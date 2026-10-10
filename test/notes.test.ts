@@ -6,7 +6,7 @@
  * what the pool emits, and the notes CLI runs as a user runs it, against a local JSON-RPC server
  * serving the same logs and receipts.
  *
- * Run: node --test test/notes.test.ts (about 5 s, most of it the 33 CLI runs). ML-KEM
+ * Run: node --test test/notes.test.ts (about 5 s, most of it the 34 CLI runs). ML-KEM
  * encapsulation draws fresh randomness, so ciphertexts differ between runs; every outcome
  * checked here does not depend on them.
  */
@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import nodeCrypto from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
@@ -972,6 +973,25 @@ test("CLI: a state named through a symbolic link is locked and saved as the file
     assert.equal(readFileSync(state, "utf8"), before);
     rmdirSync(`${state}.lock.d`);
     assert.equal(record(await waiting).number, 6);
+  } finally {
+    await node.close();
+  }
+});
+
+test("CLI: a node's oversized reply is refused before parsing, and the state lock is released", async () => {
+  // About 18 MiB of tiny values. Parsed with exact integers, 200 MiB of them aborts V8, which
+  // skips the exit handler that removes the lock.
+  const huge = new Array(9 * 2 ** 20).fill(0);
+  const node = await rpcServer(({ method }) => ({
+    result: { eth_chainId: hexPadded(CHAIN, 1), eth_getLogs: huge }[method] ?? { number: "0x10" },
+  }));
+  const dir = mkdtempSync(join(TMP, "huge-"));
+  try {
+    const state = join(dir, "state.json");
+    const config = writeConfig(dir, node.url);
+    const scan = ["scan", "--config", config, "--state", state, "--seed-file", SEED];
+    await cli(scan, "the reply is larger than 16 MiB");
+    assert.equal(existsSync(`${state}.lock.d`), false);
   } finally {
     await node.close();
   }

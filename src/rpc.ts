@@ -55,16 +55,17 @@ export async function rpc(
     throw fail("not a valid HTTP URL");
   }
   let response: Response;
-  let text: string;
+  let text: string | null;
   try {
     const headers = { "content-type": "application/json" };
     const signal = AbortSignal.timeout(timeoutMs);
     response = await fetch(url, { method: "POST", headers, body, redirect: "error", signal });
-    text = await response.text();
+    text = await cappedText(response, MAX_REPLY_BYTES);
   } catch (error) {
     throw fail(transportReason(error, timeoutMs));
   }
   if (!response.ok) throw fail(`HTTP ${response.status}`);
+  if (text === null) throw fail(`the reply is larger than ${MAX_REPLY_BYTES >> 20} MiB`);
   let reply: unknown;
   try {
     reply = parse(text);
@@ -75,6 +76,26 @@ export async function rpc(
   if (Object.hasOwn(reply, "error")) throw new RpcError(method, reply.error);
   if (!Object.hasOwn(reply, "result")) throw new RpcError(method, undefined);
   return reply.result;
+}
+
+// parse()'s reviver reads each value's source text, so a reply of many tiny values can take over
+// 100 times its size in heap: 64 MiB of them drive V8 to its default heap limit, and 200 MiB abort
+// the process, skipping the exit handlers that release a wallet's state lock. A reply is read up
+// to this cap.
+const MAX_REPLY_BYTES = 16 * 2 ** 20;
+
+/** The body as text, or null once it passes limit bytes, after which the rest is not read. */
+async function cappedText(response: Response, limit: number): Promise<string | null> {
+  const parts: Uint8Array[] = [];
+  let size = 0;
+  for await (const part of response.body ?? []) {
+    size += part.length;
+    // Leaving the loop cancels the stream.
+    if (size > limit) return null;
+    parts.push(part);
+  }
+  // As response.text() decodes: UTF-8, a leading byte order mark dropped.
+  return new TextDecoder().decode(Buffer.concat(parts));
 }
 
 // Node's error codes (ECONNREFUSED, ENOTFOUND) and fetch's own reasons ("unexpected
