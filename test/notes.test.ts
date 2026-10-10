@@ -11,6 +11,7 @@
  * checked here does not depend on them.
  */
 import assert from "node:assert/strict";
+import nodeCrypto from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
@@ -21,6 +22,7 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -452,6 +454,42 @@ test("log decoding: every wallet reads a transaction's calls apart; bad logs are
   for (const data of [word(64n) + "00".repeat(64), word(32n) + word(97n) + "00".repeat(97)]) {
     raises(() => decodeNotesData("0x" + data), "malformed Notes log");
   }
+});
+
+/** What fn returns, and how many HMACs it computed; src/notes.ts derives each tag with one. */
+function countingHmacs<T>(fn: () => T): [T, number] {
+  const { createHmac } = nodeCrypto;
+  let count = 0;
+  nodeCrypto.createHmac = (...args: Parameters<typeof createHmac>) => {
+    count++;
+    return createHmac(...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    return [fn(), count];
+  } finally {
+    nodeCrypto.createHmac = createHmac;
+    syncBuiltinESMExports();
+  }
+}
+
+test("a payment at the far edge of a channel's window derives only the tags it newly covers", () => {
+  // Each payment at the edge moves the window LOOKAHEAD indices on, and the scanner derives only
+  // the tags a move adds, so a scan takes between LOOKAHEAD and 2 LOOKAHEAD HMACs per payment.
+  // Deriving the whole window again on every move would take about LOOKAHEAD * K^2 / 2. The last
+  // payment sits at the first index the last move added, which an off-by-one would miss.
+  const [L, K] = [n.LOOKAHEAD, 100];
+  const secret = ALICE.directSecret(5n);
+  const chain = new Chain();
+  const pay = (index: bigint) => {
+    const { note, rho } = n.sealNote(secret, index, ETH);
+    chain.add(n.shieldNotes(note), [n.outputCommitment(ALICE.ownerPk, rho, ETH)], [], SHIELD);
+  };
+  for (let j = 1; j <= K; j++) pay(BigInt(j * L - 1));
+  pay(BigInt(K * L));
+  const [scanner, hmacs] = countingHmacs(() => recover(ALICE, chain.events));
+  assert.equal(scanner.notes.size, K + 1);
+  assert.ok(hmacs > L * K && hmacs < 2 * L * (K + 1), `${hmacs} HMACs`);
 });
 
 test("channels: one ciphertext per transaction, a bounded window, and late payments found", () => {

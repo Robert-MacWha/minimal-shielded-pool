@@ -140,9 +140,10 @@ export class Scanner {
   }
 
   // From index 0: a payment with an earlier index can land after a later one, including after
-  // the state was saved and loaded again.
-  #watch(incoming: Incoming): void {
-    for (let index = 0n; index < incoming.nextIndex + BigInt(LOOKAHEAD); index++) {
+  // the state was saved and loaded again. Tags stay watched, so a window that moves on derives
+  // only the indices it newly covers.
+  #watch(incoming: Incoming, from = 0n): void {
+    for (let index = from; index < incoming.nextIndex + BigInt(LOOKAHEAD); index++) {
       this.#tags.set(tagOf(noteTag(incoming.secret, index)), [incoming, index]);
     }
   }
@@ -238,8 +239,9 @@ export class Scanner {
     const { kind } = incoming;
     const record = this.#record({ cm, epoch, index, value, rho, nullifier, spent: false, kind });
     if (noteIndex + 1n > incoming.nextIndex) {
+      const watched = incoming.nextIndex + BigInt(LOOKAHEAD);
       incoming.nextIndex = noteIndex + 1n;
-      this.#watch(incoming);
+      this.#watch(incoming, watched);
     }
     if (kind === "direct" && incoming.number > this.directHighest) {
       for (let n = this.directHighest + this.#gap + 1n; n <= incoming.number + this.#gap; n++) {
