@@ -54,7 +54,11 @@ export async function main(argv: readonly string[]): Promise<void> {
   // The seed is read and checked first, so a bad seed is reported before any other option.
   const file = options["--seed-file"];
   const seed = file ? readPrivate(file) : await readSecretLine("wallet seed (hex): ");
-  const keys = new WalletKeys(pastedHex(seed.trim(), "a seed"), options["--account"] ?? 0n);
+  const seedBytes = pastedHex(seed.trim(), "a seed");
+  // WalletKeys hashes the account as one 32-byte word and throws a RangeError past it.
+  const account = options["--account"] ?? 0n;
+  if (account >= 1n << 256n) throw new NotesError("--account must be below 2^256");
+  const keys = new WalletKeys(seedBytes, account);
   const chunk = options["--chunk"];
   const command = {
     keys,

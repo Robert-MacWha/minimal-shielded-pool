@@ -6,7 +6,7 @@
  * what the pool emits, and the notes CLI runs as a user runs it, against a local JSON-RPC server
  * serving the same logs and receipts.
  *
- * Run: node --test test/notes.test.ts (about 5 s, most of it the 34 CLI runs). ML-KEM
+ * Run: node --test test/notes.test.ts (about 5 s, most of it the 35 CLI runs). ML-KEM
  * encapsulation draws fresh randomness, so ciphertexts differ between runs; every outcome
  * checked here does not depend on them.
  */
@@ -244,6 +244,9 @@ test("keys and addresses: derived from the seed and account, and checked on deco
   const ff = new Uint8Array(1152).fill(0xff);
   refused("ML-KEM-768 key is invalid", good.subarray(0, 33), ff, good.subarray(-32));
   raises(() => n.Address.decode("0xzz"), "an address is hex");
+  for (const data of [null, [...good]]) {
+    raises(() => n.Address.decode(data as never), "an address is hex or bytes");
+  }
   raises(() => n.directChannel(ALICE.ownerPk, utf8("short")), "32 bytes");
 });
 
@@ -295,6 +298,11 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   for (const event of chain.events.slice(3)) resumed.scan(event);
   assert.deepEqual(resumed.toJson().notes, alice.toJson().notes);
   raises(() => Scanner.fromJson(BOB, alice.toJson()), "another wallet");
+  // Each note found raises one secret's next_index by at most LOOKAHEAD, so a larger sum is a
+  // corrupt file, whose tags would take without end to derive.
+  const corrupt = alice.toJson();
+  corrupt.incoming[0].next_index += BigInt(n.LOOKAHEAD * alice.notes.size) + 1n;
+  raises(() => Scanner.fromJson(ALICE, parse(stringify(corrupt, 1))), "exceed its notes");
   // A node that drops a transaction's logs is caught by the next leaf's index.
   const [e0, e1] = chain.events;
   raises(() => recover(ALICE, [e0, e1, ...chain.events.slice(3)]), "missing pool logs");
@@ -897,6 +905,7 @@ test("CLI: scan and direct-secret keep owner-only state and hand out each number
     assert.equal((await cli(["address", ...seedFile])).trim(), ALICE.address().hex());
     const secondAccount = new n.WalletKeys(seedOf("alice"), 1n).address().hex();
     assert.equal((await cli(["address", "--account", "1", ...seedFile])).trim(), secondAccount);
+    await cli(["address", "--account", String(1n << 256n), ...seedFile], "below 2^256");
 
     const state = join(dir, "state.json");
     const v2 = writeConfig(dir, node.url, { profile: "position-notes-v2" });

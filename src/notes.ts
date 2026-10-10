@@ -214,6 +214,7 @@ export class Address {
   /** An address from its bytes or hex, with its owner key and ek checked. */
   static decode(data: string | Uint8Array): Address {
     if (typeof data === "string") data = pastedHex(data, "an address");
+    if (!(data instanceof Uint8Array)) throw new NotesError("an address is hex or bytes");
     if (data.length !== ADDRESS_BYTES || data[0] !== ADDRESS_VERSION) {
       throw new NotesError(
         `an address is ${ADDRESS_BYTES} bytes starting with version ${ADDRESS_VERSION}`,

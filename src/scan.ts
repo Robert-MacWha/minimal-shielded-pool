@@ -334,11 +334,18 @@ export class Scanner {
     // The file lists every watched secret, the self and direct ones included.
     scanner.incoming.length = 0;
     scanner.#tags.clear();
+    // Each note found raises its secret's next_index by at most LOOKAHEAD, and every note found
+    // is kept, so the indices sum to at most LOOKAHEAD per note. A larger sum is a corrupt file,
+    // whose tags would take without end to derive.
+    const notes = asList(state.notes, "notes");
+    let indices = BigInt(LOOKAHEAD) * BigInt(notes.length);
     for (const item of asList(state.incoming, "incoming")) {
       const i = asObject(item, "an incoming secret");
       // 32 bytes, as scan() compares secrets with timingSafeEqual, which throws on other lengths.
       const secret = fromHex(i.secret, "an incoming secret", SECRET_BYTES);
       const nextIndex = parseDec(i.next_index, "an incoming next_index");
+      indices -= nextIndex;
+      if (indices < 0n) throw new NotesError("the state file's next_index values exceed its notes");
       scanner.#add(secret, kindOf(i.kind), nextIndex, jsonInteger(i.number, "number"));
     }
     scanner.directHighest = jsonInteger(state.direct_highest, "direct_highest");
@@ -347,7 +354,7 @@ export class Scanner {
     for (const [epoch, next] of Object.entries(asObject(state.tree, "tree"))) {
       scanner.#tree.set(parseDec(epoch, "a tree epoch"), parseDec(next, "a tree size"));
     }
-    for (const item of asList(state.notes, "notes")) {
+    for (const item of notes) {
       const r = asObject(item, "a note");
       const field = (key: string) => toBigint(fromHex(r[key], `a note's ${key}`, 32));
       const uint = (key: string) => parseDec(r[key], `a note's ${key}`);
