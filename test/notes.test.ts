@@ -302,6 +302,11 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   assert.ok(!used.has(toHex(change.note.subarray(0, 16))));
   chain.add(n.spendNotes(dummy(), change.note), [change.cm], [20n, 21n]);
   assert.ok(values(recover(BOB, chain.events)).includes(ETH / 7n));
+  // A second takeover on the same finalized view resumes at the index `restored` used, so it
+  // waits until that change is final (SECURITY.md#note-delivery), and then moves past it.
+  assert.equal(n.selfChannel(bob).nextIndex, next + BigInt(n.RESTORE_SKIP));
+  const final = n.selfChannel(recover(BOB, chain.events)).nextIndex;
+  assert.equal(final, next + 2n * BigInt(n.RESTORE_SKIP) + 1n);
   for (let i = 0; i < n.LOOKAHEAD - n.RESTORE_SKIP - 1; i++) n.reserve(restored, 1n);
   raises(() => n.reserve(restored, 1n), "the recipient watches only");
 });

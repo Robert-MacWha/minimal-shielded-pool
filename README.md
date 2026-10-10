@@ -281,7 +281,8 @@ ciphertext and matches tags, and it tracks their spends by nullifier. A sender
 cannot recompute an outgoing secret, so after a restore it opens a new channel
 with each recipient. The change channel cannot be reopened, so a restored
 wallet, or a device taking over sending from the account, rebuilds it with
-`selfChannel` in `src/notes.ts`, past the indices it may have used. A sender
+`selfChannel` in `src/notes.ts`, 10 indices past the change notes in finalized
+blocks ([SECURITY.md](SECURITY.md#note-delivery) says when that is safe). A sender
 reserves an index in its saved state before broadcasting a new payment, because
 a repeated index repeats the tag, key and `rho`, and retries a payment that did
 not land with the same note. It also keeps fewer than 20 payments per channel

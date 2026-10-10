@@ -169,9 +169,16 @@ repeated index links two payments and reveals the XOR of their amounts, so a
 wallet must save each reservation before broadcasting
 ([README](README.md#note-delivery)). One device sends from an account at a
 time. A restored wallet, or a device taking over sending, resumes its change
-channel with `selfChannel` 10 indices past the last change note it found, so
-it is safe only while at most 10 change payments from the previous device are
-still pending; with more, wait until they are final or can no longer land.
+channel with `selfChannel`, skipping the 10 indices after the highest change
+index in finalized blocks. That is safe only while every change payment that
+is not final yet, but may still land, has a lower index than the one it
+resumes at. Until one of its change payments is final, a device that itself
+resumed with `selfChannel` sends from the very index the next takeover picks,
+so a single pending change payment from it makes a second takeover, or a
+second restore, repeat that index. Before taking over from such a device, wait
+until its change payments are final or can no longer land: a spend once its
+recent root has left the 8192-slot window, a shield once its sender's nonce is
+used.
 
 Anyone who knows a public address can make its wallet keep more state, one
 pool call at a time. A shield that opens a channel to the address makes the

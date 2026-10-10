@@ -349,10 +349,12 @@ type ScanResult = {
 /**
  * The self channel of a wallet restored from its seed, or of a device taking over sending (one
  * device sends from an account at a time, and a saved channel is stale once another has sent),
- * after a scan to the finalized head. It resumes RESTORE_SKIP indices past the last self note
- * found, which is safe while at most RESTORE_SKIP self payments the previous device sent are
- * pending; with more, wait until they are final or can no longer land (a spend cannot once its
- * recent root has left the window).
+ * after a scan to the finalized head. It skips the RESTORE_SKIP indices after the highest self
+ * index found, which is safe only while every self payment that is not final yet, but may still
+ * land, has a lower index than the one it resumes at. Until one of its self payments is final, a
+ * device that resumed this way sends from the index the next call returns, so before taking over
+ * from it, wait until its self payments are final or can no longer land (a spend once its recent
+ * root has left the window, a shield once its sender's nonce is used).
  */
 export function selfChannel(scanner: ScanResult): Outgoing {
   const found = scanner.incoming.find((i) => i.kind === "self");
