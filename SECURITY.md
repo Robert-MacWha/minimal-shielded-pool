@@ -229,7 +229,8 @@ logs it returns instead of leaving them out, and `scan` cannot detect that: a
 changed opening ciphertext hides every payment on that channel, and a later
 scan of the same state with another node does not read those blocks again. Scan
 with a node you trust; to check one, scan into a new state file with another
-node.
+node. The new file does not record the direct numbers the old one handed out,
+so issue direct secrets from it only once each of those numbers has been paid.
 Earlier versions of `scan` read no receipts when a new epoch began, so a state
 file they saved can lack a payment in an epoch's last leaves. When such a file
 shows an epoch that closed short of full, the next `scan` rescans from the
