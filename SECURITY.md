@@ -228,7 +228,8 @@ short, are read whole: anyone can fill a block with logs, and ethrex repeats
 each frame's logs in its receipt's top-level logs, so even one transaction's
 receipt can honestly pass 16 MiB. The node you chose, or anyone on a plain-http
 path to it, can therefore still exhaust the client's memory with a receipt
-reply, which aborts `scan` and leaves its state lock behind for you to remove. A
+reply, which aborts `scan`; the next `scan` or `direct-secret` on the same host
+takes over the state lock the aborted run left. A
 node can also alter the logs it returns instead of leaving them out, and `scan`
 cannot detect that: a changed opening ciphertext hides every payment on that
 channel, and a later scan of the same state with another node does not read

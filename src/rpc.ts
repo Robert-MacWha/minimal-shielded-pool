@@ -86,7 +86,8 @@ export async function rpc(
 // to this cap, except a receipt's: anyone can fill a block with logs, and ethrex repeats each
 // frame's logs in its receipt's top-level logs, so one block's receipts, or even one
 // transaction's, can honestly pass the cap, and nothing splits them. A receipt reply is read
-// whole, so the node, or anyone on a plain-http path to it, can still abort the process with one.
+// whole, so the node, or anyone on a plain-http path to it, can still abort the process with one;
+// the next run on the same host then takes over the state lock it left (withLock).
 const MAX_REPLY_BYTES = 16 * 2 ** 20;
 const UNCAPPED = new Set(["eth_getBlockReceipts", "eth_getTransactionReceipt"]);
 /** rpc()'s reason for refusing a reply past the cap. */
