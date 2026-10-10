@@ -836,6 +836,23 @@ test("state upgrade: a rescan finds the payment an earlier version missed and ke
   assert.equal(scanner.issueDirect(), 5n);
 });
 
+test("a finalized head behind the state's last scan is refused, not taken as nothing new", async () => {
+  // A node reported a head far past the chain's. Every later payment would sit below the saved
+  // checkpoint, so an honest node's scan must stop rather than find nothing.
+  const chain = story();
+  const finalized = { block: 10n ** 12n };
+  const node = await serve(chain, finalized);
+  try {
+    const scanner = new Scanner(ALICE, CHAIN, POOL);
+    await scanToFinalized(scanner, new RpcChain(node.url), 0n, Number.MAX_SAFE_INTEGER);
+    assert.equal(scanner.scannedBlock, 10n ** 12n);
+    finalized.block = chain.events.at(-1)!.block;
+    await assert.rejects(scanToFinalized(scanner, new RpcChain(node.url), 0n), /is behind block/);
+  } finally {
+    await node.close();
+  }
+});
+
 test("state upgrade: a rescan through a node that serves nothing of epoch 0 stops", async () => {
   // The earlier version missed Alice's payment in epoch 0's last leaf. This node serves nothing
   // of epoch 0 but that payment's receipt, so the rescan's first leaf in logs is epoch 1's first.

@@ -541,6 +541,15 @@ export async function scanToFinalized(
   }
   const start = maxBigint(scanner.scannedBlock + 1n, deployment);
   const head = await chain.finalizedBlock();
+  // A state saved at a head the chain has not reached would skip every payment up to it, so a
+  // finalized head behind the last scan is refused rather than read as nothing new.
+  if (head < scanner.scannedBlock) {
+    throw new NotesError(
+      `the RPC's finalized block ${head} is behind block ${scanner.scannedBlock}, where this ` +
+        "state's last scan stopped: the RPC lags, or a node used before reported a block the " +
+        "chain has not reached",
+    );
+  }
   const logs = await fetchLogs(chain, scanner.pool, start, head, chunk);
   const at = (e: PoolEvent) => [e.block, e.tx, BigInt(e.call)];
   for (const event of eventsFromLogs(logs)) {
