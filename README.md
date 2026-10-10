@@ -94,7 +94,7 @@ packages, including the circuit toolchain (circom2 and snarkjs).
 ```sh
 npm ci                  # install the pinned npm packages (or: just install)
 just test               # what CI's test job runs: the four recipes below
-just check-artifacts    # rebuild the circuit and dispatcher, compare with core/artifacts/
+just check-artifacts    # rebuild the circuit, dispatcher and verifier, compare with the repo
 just check              # type, format, gas, activation and compiler-settings checks
 just test-ts            # the TypeScript tests: node --test test/*.test.ts
 just test-contracts     # format, lint and test the contracts with Forge
@@ -476,7 +476,8 @@ or `-->` assignment, which sets a signal without constraining it. That check
 reads only `spend.circom`'s own source, so it does not catch every
 unconstrained signal.
 
-The tests rebuild the circuit and require byte-identical R1CS and WASM. The
+The tests rebuild the circuit and require byte-identical R1CS and WASM, and
+regenerate the verifier from the proving key and require the committed file. The
 committed artifacts come from circom2 0.2.8; 0.2.23 does not reproduce them
 byte for byte, so a compiler upgrade means a new reviewed artifact set.
 circom's optimizer removes the private `fee` input, which conservation
@@ -487,8 +488,8 @@ first nullifier, for one of them. Map wires by name through a `--sym` build, as
 `tools/setup.sh` runs a new single-party test setup, not a ceremony. Run it
 only to replace the test setup on purpose, then rebuild the activation manifest
 and proof fixtures. The activation gate checks that the proving key's A and B
-terms come from the committed R1CS and that the verifier holds the key's
-verification key; the rest of the key needs the phase-1 file (`--ptau`, see
+terms come from the committed R1CS and that the verifier's constants are the
+key's verification key; the rest of the key needs the phase-1 file (`--ptau`, see
 [SECURITY.md](SECURITY.md#assumptions)), without which the gate refuses a
 manifest marked `production: true`.
 
