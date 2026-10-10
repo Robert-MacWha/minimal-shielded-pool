@@ -72,7 +72,12 @@ Poseidon libraries and the logic with a local build, and the pool with the
 committed dispatcher initcode, before it writes `core/deploy_config.json`. A
 spend's proof names a one-time authorizer whose signature covers the whole
 transaction, so a copied or rerandomized proof is useless without that
-authorizer's key.
+authorizer's key. The dispatcher takes that signature only with an empty
+`msg`, which `SIGPARAM(0, 0x02)` reports as 0, because a signature with an
+empty `msg` covers `compute_sig_hash(tx)` and with it every frame. This rests
+on EIP-8141 making an explicit 32-byte zero `msg` invalid, which reserves 0 for
+the empty case: a client that admitted one would let a signature over that
+fixed digest pass as one over the transaction.
 
 The client encrypts notes with ML-KEM-768 and ChaCha20-Poly1305 from
 `node:crypto`, which needs Node 24.7 or later built against OpenSSL 3.5 or
