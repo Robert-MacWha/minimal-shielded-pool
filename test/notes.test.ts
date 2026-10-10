@@ -6,7 +6,7 @@
  * what the pool emits, and the notes CLI runs as a user runs it, against a local JSON-RPC server
  * serving the same logs and receipts.
  *
- * Run: node --test test/notes.test.ts (about 4 s, most of it the 30 CLI runs). ML-KEM
+ * Run: node --test test/notes.test.ts (about 5 s, most of it the 33 CLI runs). ML-KEM
  * encapsulation draws fresh randomness, so ciphertexts differ between runs; every outcome
  * checked here does not depend on them.
  */
@@ -14,12 +14,14 @@ import assert from "node:assert/strict";
 import nodeCrypto from "node:crypto";
 import {
   chmodSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
@@ -942,6 +944,34 @@ test("CLI: scan and direct-secret keep owner-only state and hand out each number
     // A config naming another pool than the state file's is refused.
     const pool2 = writeConfig(dir, node.url, { pool: hexPadded(POOL + 1n, 40) });
     await cli(["scan", "--config", pool2, "--state", state, ...seedFile], "another chain or pool");
+  } finally {
+    await node.close();
+  }
+});
+
+test("CLI: a state named through a symbolic link is locked and saved as the file it names", async () => {
+  // A save renames a new file over the path it is given. Through the link itself, the first save
+  // would replace the link with a file, and the file it named would hand out the same numbers.
+  const chain = story();
+  const node = await serve(chain, { block: chain.block });
+  const dir = mkdtempSync(join(TMP, "link-"));
+  try {
+    const [state, link] = [join(dir, "state.json"), join(dir, "link.json")];
+    const config = writeConfig(dir, node.url);
+    const args = (path: string) => ["--config", config, "--state", path, "--seed-file", SEED];
+    await cli(["scan", ...args(state)]);
+    symlinkSync(state, link);
+    assert.equal(record(await cli(["direct-secret", ...args(link)])).number, 4);
+    assert.ok(lstatSync(link).isSymbolicLink());
+    assert.equal(record(await cli(["direct-secret", ...args(state)])).number, 5);
+    // A run through the link waits for the lock that a run through the file holds.
+    mkdirSync(`${state}.lock.d`);
+    const before = readFileSync(state, "utf8");
+    const waiting = directSecretCommand({ keys: ALICE, config, state: link });
+    await sleep(300);
+    assert.equal(readFileSync(state, "utf8"), before);
+    rmdirSync(`${state}.lock.d`);
+    assert.equal(record(await waiting).number, 6);
   } finally {
     await node.close();
   }

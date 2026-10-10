@@ -52,7 +52,8 @@ function sameFile(a: FileIdentity | null, b: FileIdentity): boolean {
  * Replaces path with text in a new owner-only file. The text goes to a temporary file in the
  * same directory, created exclusively with mode 0600 and synced, which is then renamed over
  * path: a reader never sees a partial file, and one holding an earlier world-readable copy
- * open never sees the new text.
+ * open never sees the new text. The directory is synced last, so that a crash after this
+ * returns cannot bring the earlier file back.
  *
  * `previous` is what an earlier check saw at path. Leave it out to replace whatever is there.
  * null means path must still be absent, otherwise it must still be that same file, or the write
@@ -86,6 +87,12 @@ export function writePrivate(path: string, text: string, previous?: FileIdentity
   } catch (error) {
     unlessMissing(() => unlinkSync(temporary));
     throw error;
+  }
+  const directory = openSync(dirname(path), "r");
+  try {
+    fsyncSync(directory);
+  } finally {
+    closeSync(directory);
   }
 }
 

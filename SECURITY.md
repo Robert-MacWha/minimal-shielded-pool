@@ -191,11 +191,15 @@ what the sender spends on shields. Requiring the opening note to pay something
 would not raise this price, since a 1-wei payment does.
 
 Use a seed with one pool only, since direct secrets and change indices do not
-yet depend on the deployment. After a restore, direct numbers handed out but
-not yet paid may be handed out again. A direct secret cannot spend, but anyone
-who learns it, including from a recorded channel that is broken later, sees
-which outputs paid the recipient on it and their amounts. Send it over a
-post-quantum channel and never show it in a public QR code.
+yet depend on the deployment. Only the state file that issued a direct number
+records it, so issue direct secrets from one state file. A wallet restored from
+its seed or from an older copy of its state, or a second device with a state of
+its own, may hand out again a number already handed out but not yet paid, and
+two senders with one secret link their payments and can read each other's
+amounts. A direct secret cannot spend, but anyone who learns it, including from
+a recorded channel that is broken later, sees which outputs paid the recipient
+on it and their amounts. Send it over a post-quantum channel and never show it
+in a public QR code.
 
 `notes scan` rebuilds calls that ethrex `247e2dd2` leaves out of `eth_getLogs`
 (`64b8fc09` returns them), but a full withdrawal that such a node leaves out

@@ -13,6 +13,8 @@
  * issued again. Without --seed-file the seed is typed at a hidden prompt or read from standard
  * input, never taken from the command line, which other local users can read.
  */
+import { existsSync, realpathSync } from "node:fs";
+
 import { hex32, parseConfigAddress, parseDec, toHex } from "../bytes.ts";
 import { NotesError } from "../errors.ts";
 import {
@@ -149,10 +151,14 @@ export async function directSecretCommand(options: CommandOptions): Promise<stri
  */
 async function withState(
   command: string,
-  { keys, config: configPath, state: statePath }: CommandOptions,
+  { keys, config: configPath, state }: CommandOptions,
   body: (config: JsonObject, scanner: Scanner, save: () => void) => Promise<string>,
 ): Promise<string> {
-  if (!configPath || !statePath) throw new NotesError(`${command} needs --config and --state`);
+  if (!configPath || !state) throw new NotesError(`${command} needs --config and --state`);
+  // A save renames a new file over the path, and the lock is named after it, so a state named
+  // through a symbolic link is resolved first. Otherwise the save would replace the link with a
+  // file, and the file it named, now stale, could hand out the same direct numbers again.
+  const statePath = existsSync(state) ? realpathSync(state) : state;
   return withLock(statePath, () => {
     const config = asObject(readJson(configPath), configPath);
     if (config.profile !== POOL_PROFILE) {
