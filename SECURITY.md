@@ -227,10 +227,14 @@ epoch seen one leaf short, it stops at any block whose receipts pass 16 MiB,
 which anyone can cause by filling a block with logs. A node can also alter the
 logs it returns instead of leaving them out, and `scan` cannot detect that: a
 changed opening ciphertext hides every payment on that channel, and a later
-scan of the same state with another node does not read those blocks again. Scan
-with a node you trust; to check one, scan into a new state file with another
-node. The new file does not record the direct numbers the old one handed out,
-so issue direct secrets from it only once each of those numbers has been paid.
+scan of the same state with another node does not read those blocks again. A
+node that reports a finalized block the chain has not reached makes the state
+skip every block the chain finalizes up to that one, and until the chain gets
+there, `scan` refuses an honest node as lagging. Scan with a node you trust; to
+check one, or when `scan` keeps calling a node lagging, scan into a new state
+file with another node. The new file does not record the direct numbers the old
+one handed out, so issue direct secrets from it only once each of those numbers
+has been paid.
 Earlier versions of `scan` read no receipts when a new epoch began, so a state
 file they saved can lack a payment in an epoch's last leaves. When such a file
 shows an epoch that closed short of full, the next `scan` rescans from the

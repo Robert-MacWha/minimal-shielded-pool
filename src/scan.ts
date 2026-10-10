@@ -565,7 +565,9 @@ export async function scanToFinalized(
     throw new NotesError(
       `the RPC's finalized block ${head} is behind block ${scanner.scannedBlock}, where this ` +
         "state's last scan stopped: the RPC lags, or a node used before reported a block the " +
-        "chain has not reached",
+        "chain had not reached, in which case this state skips every block the chain finalizes " +
+        "up to that one. Unless the lag ends soon, scan into a new state file with a node you " +
+        "trust",
     );
   }
   const at = (e: PoolEvent) => [e.block, e.tx, BigInt(e.call)];
