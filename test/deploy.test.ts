@@ -258,11 +258,23 @@ test("the compiler settings check against the real forge", async () => {
   const args = ["check-forge-config.ts", "../core/activation_manifest.testbed.json"];
   const check = (env: Env) =>
     runCli(process.execPath, [...args, "../core/contracts"], { cwd: join(ROOT, "tools"), env });
-  const [ok, bad] = await Promise.all([clean, { ...clean, foundry_via_ir: "false" }].map(check));
+  // A per-file restriction recompiles the logic with other settings, the profile unchanged.
+  const restricted = {
+    ...clean,
+    FOUNDRY_ADDITIONAL_COMPILER_PROFILES: '[{name="cheap",via_ir=false,optimizer_runs=1}]',
+    FOUNDRY_COMPILATION_RESTRICTIONS:
+      '[{paths="src/ShieldedPoolLogic.sol",via_ir=false,max_optimizer_runs=1}]',
+  };
+  const [ok, bad, perFile] = await Promise.all(
+    [clean, { ...clean, foundry_via_ir: "false" }, restricted].map(check),
+  );
   assert.equal(ok.code, 0, ok.stderr);
   assert.equal(ok.stdout, '{"compiler": "match", "profiles": ["default", "libsmall"]}\n');
   assert.equal(bad.code, 1);
   assert.ok(bad.stderr.includes("via_ir"), bad.stderr);
+  assert.equal(perFile.code, 1);
+  assert.ok(perFile.stderr.includes("compilation_restrictions="), perFile.stderr);
+  assert.ok(perFile.stderr.includes("additional_compiler_profiles="), perFile.stderr);
 });
 
 const initcode = (...addresses: string[]) =>
