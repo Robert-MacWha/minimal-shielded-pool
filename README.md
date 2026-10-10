@@ -357,10 +357,10 @@ they landed. `notes scan` finds a wallet's notes, but no command spends them
 yet.
 
 ```sh
-# Deposit one of a fixture's notes, paid by the funded account.
-printf '%s\n' "$FUNDED_KEY" | node src/cli/pool.ts RPC CONFIG FIXTURE shield [--note N]
+# Deposit one of a fixture's notes, paid by the funded account, whose key it prompts for.
+node src/cli/pool.ts RPC CONFIG FIXTURE shield [--note N]
 # Publish an epoch's root to EIP-8272, so that spends can prove against it.
-printf '%s\n' "$FUNDED_KEY" | node src/cli/pool.ts RPC CONFIG FIXTURE publish [--epoch N]
+node src/cli/pool.ts RPC CONFIG FIXTURE publish [--epoch N]
 # Send a fixture's transfer against the root that slot N published.
 node src/cli/pool.ts RPC CONFIG FIXTURE transfer [--spend-key NAME] [--root-slot N]
 # Send a fixture's withdrawal; its fourth frame claims the credit unless --no-tail.
@@ -386,9 +386,10 @@ node src/cli/smoke.ts [--random --chain-id=N --pool-address=0x... --recipient=0x
 node src/cli/nonce-race.ts --pool-address=0x... [--random] [--rpc=URL] [--output=PATH]
 ```
 
-`--spend-key` names the fixture's spend entry, such as `withdraw_seed` or a
-nonce-race fixture's `transfer_c`. Every pool command accepts `--dry-run`,
-which signs the transaction and asks the RPC to simulate it without sending it.
+`--spend-key` takes the name of a fixture's spend entry, such as `withdraw_seed`
+or a nonce-race fixture's `transfer_c`, never the `spend_key` value inside one.
+Every pool command accepts `--dry-run`, which signs the transaction and asks
+the RPC to simulate it without sending it.
 The RPC still sees the signed transaction and could broadcast it. A transfer or
 withdrawal without `--root-slot` uses the slot the config records for it. The
 four `--action-*` options replace a spend's fourth frame with a custom call

@@ -48,7 +48,10 @@ const SPEC = {
     "--dry-run": { kind: "flag", help: "simulate without submitting" },
     "--epoch": { kind: "int", help: "epoch to publish" },
     "--note": { kind: "int", help: "index into the fixture's shields" },
-    "--spend-key": { kind: "string", help: "fixture key of the spend entry (e.g. transfer_c)" },
+    "--spend-key": {
+      kind: "string",
+      help: "name of the fixture's spend entry (e.g. transfer_c), never a key",
+    },
     "--root-slot": { kind: "int", help: "consensus slot that published the root" },
     "--no-tail": { kind: "flag", help: "send a spend without a fourth frame" },
     "--allow-failed-claim": {
