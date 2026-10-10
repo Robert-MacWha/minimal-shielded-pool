@@ -21,7 +21,9 @@ export function toHex(bytes: Uint8Array): string {
 
 /** Decodes "0x"-prefixed hex, optionally of an exact byte length. */
 export function fromHex(text: unknown, what: string, length?: number): Uint8Array {
-  if (typeof text !== "string" || !/^0x([0-9a-fA-F]{2})*$/.test(text)) {
+  // The prefix and an even length make whole bytes. A repeated group, /^0x([0-9a-fA-F]{2})*$/,
+  // overflows V8's stack on 8 MiB of digits, which a node's reply can hold.
+  if (typeof text !== "string" || text.length % 2 !== 0 || !/^0x[0-9a-fA-F]*$/.test(text)) {
     throw new InputError(`${what} must be 0x-prefixed hex with whole bytes`);
   }
   const bytes = hexToBytes(text.slice(2));

@@ -479,6 +479,21 @@ test("log decoding: every wallet reads a transaction's calls apart; bad logs are
   }
 });
 
+test("16 MiB of hex is read without overflowing the stack, and malformed hex is refused", () => {
+  // A node's Notes log can carry that much data under rpc()'s cap. fromHex's pattern once had a
+  // repeated group, which overflowed V8's stack on 8 MiB of digits and crashed the CLI.
+  const digits = "00".repeat(8 * 2 ** 20);
+  assert.equal(fromHex("0x" + digits, "data").length, 8 * 2 ** 20);
+  raises(() => decodeNotesData("0x" + digits), "malformed Notes log");
+  assert.deepEqual(fromHex("0x", "data"), new Uint8Array());
+  assert.deepEqual(fromHex("0xAbcD", "data"), new Uint8Array([0xab, 0xcd]));
+  // Each refused string but "0x0" and "0x000" has an even length, so the pattern refuses it.
+  const message = "data must be 0x-prefixed hex with whole bytes";
+  for (const text of ["", "00", "0X00", "0x0", "0x000", "0x0g", "0x0\n", "  0x00", 0, null]) {
+    assert.throws(() => fromHex(text, "data"), { message }, JSON.stringify(text));
+  }
+});
+
 /** What fn returns, and how many HMACs it computed; src/notes.ts derives each tag with one. */
 function countingHmacs<T>(fn: () => T): [T, number] {
   const { createHmac } = nodeCrypto;
