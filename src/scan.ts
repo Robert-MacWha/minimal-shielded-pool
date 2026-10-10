@@ -129,6 +129,9 @@ export class Scanner {
     this.chainId = chainId;
     this.pool = pool;
     this.#gap = BigInt(options.gap ?? GAP);
+    // Every pool starts at epoch 0, so a node that serves nothing of it stops the scan instead
+    // of letting it begin at a later epoch and miss that epoch's notes.
+    this.#tree.set(0n, 0n);
     this.#add(keys.selfSecret, "self");
     for (let n = 0n; n < this.#gap; n++) this.#add(keys.directSecret(n), "direct", 0n, n);
   }

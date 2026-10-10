@@ -279,7 +279,11 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   const notes = n.spendNotes(late.note, late.note);
   const leaf = { cm: late.cm, epoch: 1n, index: 0n };
   const twice = { block: 1n, tx: 0n, call: 0, notes, leaves: [leaf], spent: [] };
-  const lateFound = new Scanner(ALICE, CHAIN, POOL).scan(twice);
+  // A fresh scan cannot begin at epoch 1, since a node that served nothing of epoch 0 would hide
+  // its notes. A scanner that has seen epoch 0 full takes the leaf.
+  raises(() => new Scanner(ALICE, CHAIN, POOL).scan(twice), "missing pool logs");
+  const fullEpoch0 = { ...new Scanner(ALICE, CHAIN, POOL).toJson(), tree: { "0": TREE_CAPACITY } };
+  const lateFound = Scanner.fromJson(ALICE, parse(stringify(fullEpoch0))).scan(twice);
   assert.equal(lateFound.length, 1);
   assert.equal(lateFound[0].nullifier, nullifierOf(ALICE, late.cm, 0n, 1n));
   // A direct secret past the gap stays hidden until the wallet looks further.
