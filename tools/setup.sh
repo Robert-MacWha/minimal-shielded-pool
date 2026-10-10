@@ -28,37 +28,42 @@ set -euo pipefail
 # From the repository root: circom2 runs under WASI and finds circomlib only through an
 # include path inside its working directory.
 cd "$(dirname "$0")/.."
+# The circom2 and snarkjs that `npm ci` pins. npx would run a copy found in any parent
+# directory's node_modules, or install the latest release, without asking when stdin is not
+# a terminal.
+CIRCOM=node_modules/.bin/circom2 SNARKJS=node_modules/.bin/snarkjs
+[[ -x $CIRCOM && -x $SNARKJS ]] || { echo "run npm ci first: setup needs the pinned circom2 and snarkjs" >&2; exit 1; }
 
 BUILD=build
 ARTIFACTS=core/artifacts
 mkdir -p "$BUILD"
 
-echo "==> compiling spend.circom (circom $(npx circom2 --version | tail -1 | awk '{print $3}'))"
-npx circom2 core/circuits/spend.circom --r1cs --wasm --sym -l node_modules -o "$BUILD"
-npx snarkjs r1cs info "$BUILD/spend.r1cs"
+echo "==> compiling spend.circom (circom $("$CIRCOM" --version | tail -1 | awk '{print $3}'))"
+"$CIRCOM" core/circuits/spend.circom --r1cs --wasm --sym -l node_modules -o "$BUILD"
+"$SNARKJS" r1cs info "$BUILD/spend.r1cs"
 
 if [ -n "${PTAU:-}" ]; then
   echo "==> using external powers of tau: $PTAU"
   cp "$PTAU" "$BUILD/pot_final.ptau"
 else
   echo "==> TESTBED phase 1: local powers of tau (power 14)"
-  npx snarkjs powersoftau new bn128 14 "$BUILD/pot14_0.ptau" -v >/dev/null
-  npx snarkjs powersoftau contribute "$BUILD/pot14_0.ptau" "$BUILD/pot14_1.ptau" \
+  "$SNARKJS" powersoftau new bn128 14 "$BUILD/pot14_0.ptau" -v >/dev/null
+  "$SNARKJS" powersoftau contribute "$BUILD/pot14_0.ptau" "$BUILD/pot14_1.ptau" \
     --name="testbed" -e="$(head -c 64 /dev/urandom | base64)" >/dev/null
-  npx snarkjs powersoftau prepare phase2 "$BUILD/pot14_1.ptau" "$BUILD/pot_final.ptau" -v >/dev/null
+  "$SNARKJS" powersoftau prepare phase2 "$BUILD/pot14_1.ptau" "$BUILD/pot_final.ptau" -v >/dev/null
 fi
 
 echo "==> phase 2: circuit-specific zkey"
-npx snarkjs groth16 setup "$BUILD/spend.r1cs" "$BUILD/pot_final.ptau" "$BUILD/spend_0.zkey" >/dev/null
-npx snarkjs zkey contribute "$BUILD/spend_0.zkey" "$BUILD/spend_final.zkey" \
+"$SNARKJS" groth16 setup "$BUILD/spend.r1cs" "$BUILD/pot_final.ptau" "$BUILD/spend_0.zkey" >/dev/null
+"$SNARKJS" zkey contribute "$BUILD/spend_0.zkey" "$BUILD/spend_final.zkey" \
   --name="testbed" -e="$(head -c 64 /dev/urandom | base64)" >/dev/null
-npx snarkjs zkey verify "$BUILD/spend.r1cs" "$BUILD/pot_final.ptau" "$BUILD/spend_final.zkey" >/dev/null
+"$SNARKJS" zkey verify "$BUILD/spend.r1cs" "$BUILD/pot_final.ptau" "$BUILD/spend_final.zkey" >/dev/null
 cp "$BUILD/spend.r1cs" "$BUILD/spend_final.zkey" "$ARTIFACTS/"
 cp "$BUILD/spend_js/spend.wasm" "$ARTIFACTS/spend_js/"
 
 echo "==> exporting the verification key and the Solidity verifier"
-npx snarkjs zkey export verificationkey "$BUILD/spend_final.zkey" "$ARTIFACTS/spend_vkey.json"
-npx snarkjs zkey export solidityverifier "$BUILD/spend_final.zkey" core/contracts/src/Groth16Verifier.sol
+"$SNARKJS" zkey export verificationkey "$BUILD/spend_final.zkey" "$ARTIFACTS/spend_vkey.json"
+"$SNARKJS" zkey export solidityverifier "$BUILD/spend_final.zkey" core/contracts/src/Groth16Verifier.sol
 node tools/patch-verifier.ts
 ( cd core/contracts && forge fmt src/Groth16Verifier.sol )
 
