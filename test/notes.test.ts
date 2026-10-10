@@ -865,6 +865,37 @@ test("a finalized head behind the state's last scan is refused, not taken as not
   }
 });
 
+test("each eth_getLogs or eth_getBlockReceipts reply is applied before the next is read", async () => {
+  // Replies under rpc()'s cap, kept until the last one arrives, would fill the heap and abort
+  // the process before any of them is checked, so a malformed first reply stops the scan.
+  const chain = new Chain();
+  chain.size = 5n; // a shield at leaf 5 shows leaves 0 to 4 left out, so scan reads receipts
+  const deposit = paid(BOB.ownerPk, n.directChannel(BOB.ownerPk, BOB.selfSecret), ETH);
+  chain.add(n.shieldNotes(deposit.note), [deposit.cm], [], SHIELD);
+  const notesLog = { address: hexPadded(POOL, 40), topics: [NOTES], data: "0x" };
+  const receipts = [{ transactionIndex: "0x0", status: "0x1", logs: [notesLog] }];
+  const cases = [
+    ["eth_getLogs", [[{}]], /a log must be a JSON object/],
+    ["eth_getBlockReceipts", rpcLogs(chain), /malformed Notes log/],
+  ] as const;
+  for (const [method, logs, refusal] of cases) {
+    const node = await rpcServer((call) => ({
+      result: {
+        eth_chainId: hexPadded(CHAIN, 1),
+        eth_getLogs: logs,
+        eth_getBlockReceipts: receipts,
+      }[call.method] ?? { number: "0xc8" },
+    }));
+    try {
+      const scanner = new Scanner(ALICE, CHAIN, POOL);
+      await assert.rejects(scanToFinalized(scanner, new RpcChain(node.url), 0n, 10), refusal);
+      assert.equal(node.requests.filter((r) => r.method === method).length, 1);
+    } finally {
+      await node.close();
+    }
+  }
+});
+
 test("state upgrade: a rescan through a node that serves nothing of epoch 0 stops", async () => {
   // The earlier version missed Alice's payment in epoch 0's last leaf. This node serves nothing
   // of epoch 0 but that payment's receipt, so the rescan's first leaf in logs is epoch 1's first.

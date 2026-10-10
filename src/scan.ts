@@ -477,29 +477,30 @@ export function eventsFromLogs(logs: readonly unknown[]): PoolEvent[] {
 
 type Rpc = Pick<RpcChain, "call">;
 
-/** The pool's LeafAppended, NoteSpent and Notes logs in [from, to]. */
-async function fetchLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint, chunk = 2000) {
+/**
+ * The pool's LeafAppended, NoteSpent and Notes logs in [from, to], one eth_getLogs reply at a
+ * time, so that no more than one reply is held at once.
+ */
+async function* fetchLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint, chunk = 2000) {
   if (!(Number.isSafeInteger(chunk) && chunk >= 1)) {
     throw new NotesError("a chunk is at least one block");
   }
-  const logs: unknown[] = [];
   for (let start = from, step = BigInt(chunk); start <= to; start += step) {
     const end = start + step - 1n < to ? start + step - 1n : to;
     const range = { fromBlock: hexPadded(start, 1), toBlock: hexPadded(end, 1) };
     const filter = { address: hexPadded(pool, 40), topics: [POOL_TOPICS], ...range };
-    logs.push(...asList(await chain.call("eth_getLogs", [filter]), "eth_getLogs's result"));
+    yield asList(await chain.call("eth_getLogs", [filter]), "eth_getLogs's result");
   }
-  return logs;
 }
 
 /**
- * The same logs, read from block receipts. ethrex 247e2dd2 leaves out of eth_getLogs every log
- * of a frame transaction in which any frame failed, although the frames that succeeded,
- * settlement included, keep their effects.
+ * The same logs, read from block receipts one block at a time. ethrex 247e2dd2 leaves out of
+ * eth_getLogs every log of a frame transaction in which any frame failed, although the frames
+ * that succeeded, settlement included, keep their effects.
  */
-async function receiptLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint) {
-  const logs: unknown[] = [];
+async function* receiptLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint) {
   for (let block = from; block <= to; block++) {
+    const logs: unknown[] = [];
     const receipts = await chain.call("eth_getBlockReceipts", [hexPadded(block, 1)]);
     for (const value of asList(receipts ?? [], "eth_getBlockReceipts's result")) {
       const receipt = asObject(value, "a receipt");
@@ -529,8 +530,8 @@ async function receiptLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint) {
         }),
       );
     }
+    yield logs;
   }
-  return logs;
 }
 
 /**
@@ -560,23 +561,28 @@ export async function scanToFinalized(
         "chain has not reached",
     );
   }
-  const logs = await fetchLogs(chain, scanner.pool, start, head, chunk);
   const at = (e: PoolEvent) => [e.block, e.tx, BigInt(e.call)];
-  for (const event of eventsFromLogs(logs)) {
-    if (scanner.skipsLeaves(event)) {
-      // The missing calls came after the last leaf seen (possibly in its block) and before
-      // this event. Apply each one not applied yet, whether or not this node's eth_getLogs
-      // shows it, since an earlier scan may have used a node that left it out. A call without
-      // leaves changes nothing when applied twice.
-      const from = maxBigint(scanner.leafBlock, deployment);
-      const missed = eventsFromLogs(await receiptLogs(chain, scanner.pool, from, event.block));
-      for (const call of missed) {
-        if (compareKeys(at(call), at(event)) < 0 && !scanner.applied(call)) {
-          scanner.scan(call, false);
+  // Each reply's events are applied before the next reply is read, here and in the receipts
+  // fallback: a node that sends many replies under rpc()'s cap must not be able to fill the
+  // heap, which aborts the process.
+  for await (const logs of fetchLogs(chain, scanner.pool, start, head, chunk)) {
+    for (const event of eventsFromLogs(logs)) {
+      if (scanner.skipsLeaves(event)) {
+        // The missing calls came after the last leaf seen (possibly in its block) and before
+        // this event. Apply each one not applied yet, whether or not this node's eth_getLogs
+        // shows it, since an earlier scan may have used a node that left it out. A call
+        // without leaves changes nothing when applied twice.
+        const from = maxBigint(scanner.leafBlock, deployment);
+        for await (const logs of receiptLogs(chain, scanner.pool, from, event.block)) {
+          for (const call of eventsFromLogs(logs)) {
+            if (compareKeys(at(call), at(event)) < 0 && !scanner.applied(call)) {
+              scanner.scan(call, false);
+            }
+          }
         }
       }
+      scanner.scan(event);
     }
-    scanner.scan(event);
   }
   scanner.scannedBlock = maxBigint(scanner.scannedBlock, head);
 }
