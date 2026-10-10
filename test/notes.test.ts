@@ -262,7 +262,7 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   assert.equal(bob.unspent().length, 5);
   assert.equal(alice.unspent().length, 5);
   // Any ciphertext decapsulates, to a pseudorandom key if it was meant for another wallet, so a
-  // wallet watches only the keys its notes opened under: Alice's three paid channels, Carol's
+  // wallet watches only the keys whose tags its notes carry: Alice's three paid channels, Carol's
   // payment to Bob, and none for Carol.
   const kemChannels = (s: Scanner) => s.incoming.filter((i) => i.kind === "kem").length;
   assert.deepEqual([alice, bob, carol].map(kemChannels), [3, 1, 0]);
@@ -490,6 +490,18 @@ test("a payment at the far edge of a channel's window derives only the tags it n
   const [scanner, hmacs] = countingHmacs(() => recover(ALICE, chain.events));
   assert.equal(scanner.notes.size, K + 1);
   assert.ok(hmacs > L * K && hmacs < 2 * L * (K + 1), `${hmacs} HMACs`);
+});
+
+test("a ciphertext that lands twice opens one channel", () => {
+  // A shield retried with the same bytes can land twice, since a shield spends no nullifier.
+  const chain = new Chain();
+  const shield = paid(ALICE.ownerPk, n.openChannel(ALICE.address()), ETH);
+  for (let i = 0; i < 2; i++) {
+    chain.add(n.shieldNotes(shield.note, shield.ciphertext), [shield.cm], [], SHIELD);
+  }
+  const scanner = recover(ALICE, chain.events);
+  assert.equal(scanner.incoming.filter((i) => i.kind === "kem").length, 1);
+  assert.equal(scanner.notes.size, 2);
 });
 
 test("channels: one ciphertext per transaction, a bounded window, and late payments found", () => {

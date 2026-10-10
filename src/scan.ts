@@ -207,10 +207,13 @@ export class Scanner {
       const secret = this.keys.decapsulate(body.subarray(0, KEM_CIPHERTEXT_BYTES));
       body = body.subarray(KEM_CIPHERTEXT_BYTES);
       // A foreign ciphertext decapsulates to a pseudorandom key, so a secret is adopted only if
-      // a note carries a tag at an index a fresh channel would watch.
+      // a note carries a tag at an index a fresh channel would watch. A watched secret's first
+      // tag is always in #tags, so one lookup tells whether the secret is already watched.
       const window = new Set<string>();
       for (let i = 0n; i < BigInt(LOOKAHEAD); i++) window.add(tagOf(noteTag(secret, i)));
-      const known = this.incoming.some((i) => crypto.timingSafeEqual(i.secret, secret));
+      const [first] = window;
+      const watched = this.#tags.get(first!);
+      const known = watched !== undefined && crypto.timingSafeEqual(watched[0].secret, secret);
       if (!known && notesOf(body).some((note) => window.has(tagOf(note)))) this.#add(secret, "kem");
     } else if (![0, NOTE_BYTES, 2 * NOTE_BYTES].includes(body.length)) {
       throw new NotesError(`an event published ${body.length} note bytes`);

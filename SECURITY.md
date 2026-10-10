@@ -173,6 +173,16 @@ channel with `selfChannel` 10 indices past the last change note it found, so
 it is safe only while at most 10 change payments from the previous device are
 still pending; with more, wait until they are final or can no longer land.
 
+Anyone who knows a public address can make its wallet keep more state, one
+pool call at a time. A shield that opens a channel to the address makes the
+wallet watch that channel's secret for good once its note starts with one of
+the channel's first 20 tags, even if the note pays nothing, and a 1-wei
+payment at the far end of a channel's window moves that window 20 indices
+ahead. Each adds up to a few hundred bytes to the state file and 20 tags that
+every later `scan` derives again, so the state and the scan time grow with
+what the sender spends on shields. Requiring the opening note to pay something
+would not raise this price, since a 1-wei payment does.
+
 Use a seed with one pool only, since direct secrets and change indices do not
 yet depend on the deployment. After a restore, direct numbers handed out but
 not yet paid may be handed out again. A direct secret cannot spend, but anyone
