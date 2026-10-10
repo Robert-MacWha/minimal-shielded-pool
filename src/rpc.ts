@@ -281,23 +281,35 @@ export class RpcChain implements Chain {
     });
   }
 
-  /** The pool's logs from fromBlock to the head, in one eth_getLogs call. */
+  /**
+   * The pool's logs from fromBlock to the latest block, 2,000 blocks per eth_getLogs call, as
+   * notes scan reads them by default. One call over the whole history would pass rpc()'s cap
+   * once the pool held about 25,000 shields.
+   */
   async logs(address: bigint, topics: readonly unknown[], fromBlock = 0n): Promise<ChainLog[]> {
-    const filter = {
-      address: hexPadded(address, 40),
-      topics,
-      fromBlock: hexPadded(fromBlock, 1),
-      toBlock: "latest",
-    };
-    const found = await this.call("eth_getLogs", [filter]);
-    return answer("eth_getLogs", () => {
-      if (!Array.isArray(found)) throw new Error("not a list of logs");
-      return found.map((log: unknown) => {
-        const tx = isObject(log) ? log.transactionHash : undefined;
-        if (typeof tx !== "string") throw new Error("a log has no transactionHash");
-        return { tx: tx.toLowerCase(), ...rawLog(log) };
+    const latest = await this.call("eth_blockNumber", []);
+    const head = answer("eth_blockNumber", () => parseHex(latest, "the block number"));
+    const logs: ChainLog[][] = [];
+    for (let start = fromBlock; start <= head; start += 2000n) {
+      const end = start + 1999n < head ? start + 1999n : head;
+      const filter = {
+        address: hexPadded(address, 40),
+        topics,
+        fromBlock: hexPadded(start, 1),
+        toBlock: hexPadded(end, 1),
+      };
+      const found = await this.call("eth_getLogs", [filter]);
+      const chunk = answer("eth_getLogs", () => {
+        if (!Array.isArray(found)) throw new Error("not a list of logs");
+        return found.map((log: unknown) => {
+          const tx = isObject(log) ? log.transactionHash : undefined;
+          if (typeof tx !== "string") throw new Error("a log has no transactionHash");
+          return { tx: tx.toLowerCase(), ...rawLog(log) };
+        });
       });
-    });
+      logs.push(chunk);
+    }
+    return logs.flat();
   }
 }
 

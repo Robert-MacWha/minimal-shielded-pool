@@ -392,12 +392,36 @@ test("the RPC reader finds a consumed nonce key at its EIP-8250 storage slot", a
   assert.equal(await reader.nonceUsed(POOL, nf.b), false);
 });
 
+test("the RPC reader reads logs 2,000 blocks per call, up to the latest block", async () => {
+  // One eth_getLogs call over the pool's whole history would pass rpc()'s 16 MiB cap once the
+  // pool held about 25,000 shields, and export would be refused for everyone.
+  const ranges: string[][] = [];
+  const call = async (method: string, params: readonly unknown[]) => {
+    if (method === "eth_blockNumber") return "0x1388";
+    const { fromBlock, toBlock } = params[0] as { fromBlock: string; toBlock: string };
+    ranges.push([fromBlock, toBlock]);
+    return [{ ...leaf(BigInt(ranges.length), 0n, 0n), transactionHash: `0xA${ranges.length}` }];
+  };
+  const reader = Object.assign(new RpcChain("http://127.0.0.1:1"), { call });
+  const logs = await reader.logs(POOL, [], 1000n);
+  assert.deepEqual(ranges, [
+    ["0x3e8", "0xbb7"],
+    ["0xbb8", "0x1387"],
+    ["0x1388", "0x1388"],
+  ]);
+  assert.deepEqual(
+    logs.map((l) => l.tx),
+    ["0xa1", "0xa2", "0xa3"],
+  );
+});
+
 const run = (args: string[]) => runCli(process.execPath, [CLI, ...args], { cwd: TMP });
 
 /**
- * A local node for the CLI. It answers eth_chainId, and eth_getLogs from `source`, the one call
- * an export of output notes makes. Any other call gets null, which the client reports as a
- * malformed answer, and a request to /moved is redirected to /.
+ * A local node for the CLI. It answers eth_chainId, eth_blockNumber with block 1, and
+ * eth_getLogs from `source`, the calls an export of output notes makes. Any other call gets
+ * null, which the client reports as a malformed answer, and a request to /moved is redirected
+ * to /.
  */
 function node(source: Chain) {
   return rpcServer(({ method, params, path }) => {
@@ -405,7 +429,8 @@ function node(source: Chain) {
     const found =
       method === "eth_getLogs" ? source.logs(BigInt(params[0].address), params[0].topics) : null;
     const logs = found?.map(({ tx, ...l }) => ({ ...l, transactionHash: tx })) ?? null;
-    return { result: method === "eth_chainId" ? hexPadded(CHAIN, 1) : logs };
+    const fixed = { eth_chainId: hexPadded(CHAIN, 1), eth_blockNumber: "0x1" }[method];
+    return { result: fixed ?? logs };
   });
 }
 
