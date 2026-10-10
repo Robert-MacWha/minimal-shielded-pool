@@ -219,22 +219,26 @@ appends no leaf, so it leaves no gap: its note shows as unspent, and spending
 it fails. A node that also leaves a call out of its receipts makes `scan` stop,
 except for a call in an epoch's last leaf when a two-leaf settlement began the
 next epoch: the pool also closes an epoch one leaf short before such a
-settlement, so nothing shows the gap. The client refuses any node reply over 16
-MiB before parsing it. When one `eth_getLogs` range holds more than about 5,000
-ML-KEM shields, `scan` needs a smaller `--chunk`. Receipts are read one block
-per call, so when `scan` reads them, as it does after a gap in the leaves or an
-epoch seen one leaf short, it stops at any block whose receipts pass 16 MiB,
-which anyone can cause by filling a block with logs. A node can also alter the
-logs it returns instead of leaving them out, and `scan` cannot detect that: a
-changed opening ciphertext hides every payment on that channel, and a later
-scan of the same state with another node does not read those blocks again. A
-node that reports a finalized block the chain has not reached makes the state
-skip every block the chain finalizes up to that one, and until the chain gets
-there, `scan` refuses an honest node as lagging. Scan with a node you trust; to
-check one, or when `scan` keeps calling a node lagging, scan into a new state
-file with another node. The new file does not record the direct numbers the old
-one handed out, so issue direct secrets from it only once each of those numbers
-has been paid.
+settlement, so nothing shows the gap. The client refuses a node's reply over 16
+MiB before parsing it, except a reply to `eth_getBlockReceipts` or
+`eth_getTransactionReceipt`. When one `eth_getLogs` range holds more than about
+5,000 ML-KEM shields, `scan` needs a smaller `--chunk`. Receipts, which `scan`
+reads one block per call after a gap in the leaves or an epoch seen one leaf
+short, are read whole: anyone can fill a block with logs, and ethrex repeats
+each frame's logs in its receipt's top-level logs, so even one transaction's
+receipt can honestly pass 16 MiB. The node you chose, or anyone on a plain-http
+path to it, can therefore still exhaust the client's memory with a receipt
+reply, which aborts `scan` and leaves its state lock behind for you to remove. A
+node can also alter the logs it returns instead of leaving them out, and `scan`
+cannot detect that: a changed opening ciphertext hides every payment on that
+channel, and a later scan of the same state with another node does not read
+those blocks again. A node that reports a finalized block the chain has not
+reached makes the state skip every block the chain finalizes up to that one, and
+until the chain gets there, `scan` refuses an honest node as lagging. Scan with
+a node you trust; to check one, or when `scan` keeps calling a node lagging,
+scan into a new state file with another node. The new file does not record the
+direct numbers the old one handed out, so issue direct secrets from it only once
+each of those numbers has been paid.
 Earlier versions of `scan` read no receipts when a new epoch began, so a state
 file they saved can lack a payment in an epoch's last leaves. When such a file
 shows an epoch that closed short of full, the next `scan` rescans from the

@@ -60,7 +60,9 @@ export async function rpc(
     const headers = { "content-type": "application/json" };
     const signal = AbortSignal.timeout(timeoutMs);
     response = await fetch(url, { method: "POST", headers, body, redirect: "error", signal });
-    text = await cappedText(response, MAX_REPLY_BYTES);
+    text = UNCAPPED.has(method)
+      ? await response.text()
+      : await cappedText(response, MAX_REPLY_BYTES);
   } catch (error) {
     throw fail(transportReason(error, timeoutMs));
   }
@@ -81,8 +83,12 @@ export async function rpc(
 // parse()'s reviver reads each value's source text, so a reply of many tiny values can take over
 // 100 times its size in heap: 64 MiB of them drive V8 to its default heap limit, and 200 MiB abort
 // the process, skipping the exit handlers that release a wallet's state lock. A reply is read up
-// to this cap.
+// to this cap, except a receipt's: anyone can fill a block with logs, and ethrex repeats each
+// frame's logs in its receipt's top-level logs, so one block's receipts, or even one
+// transaction's, can honestly pass the cap, and nothing splits them. A receipt reply is read
+// whole, so the node, or anyone on a plain-http path to it, can still abort the process with one.
 const MAX_REPLY_BYTES = 16 * 2 ** 20;
+const UNCAPPED = new Set(["eth_getBlockReceipts", "eth_getTransactionReceipt"]);
 /** rpc()'s reason for refusing a reply past the cap. */
 export const TOO_LARGE = `the reply is larger than ${MAX_REPLY_BYTES >> 20} MiB`;
 

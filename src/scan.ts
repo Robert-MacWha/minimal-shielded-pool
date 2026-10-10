@@ -572,8 +572,9 @@ export async function scanToFinalized(
   }
   const at = (e: PoolEvent) => [e.block, e.tx, BigInt(e.call)];
   // Each reply's events are applied before the next reply is read, here and in the receipts
-  // fallback: a node that sends many replies under rpc()'s cap must not be able to fill the
-  // heap, which aborts the process.
+  // fallback, so a scan holds one reply at a time: a node that sends many eth_getLogs replies
+  // under rpc()'s cap must not be able to fill the heap, which aborts the process. rpc() reads a
+  // receipts reply whole, so the node can still do that with one.
   for await (const logs of fetchLogs(chain, scanner.pool, start, head, chunk)) {
     for (const event of eventsFromLogs(logs)) {
       if (scanner.skipsLeaves(event)) {

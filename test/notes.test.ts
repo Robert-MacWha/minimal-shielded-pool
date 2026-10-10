@@ -901,6 +901,67 @@ test("each eth_getLogs or eth_getBlockReceipts reply is applied before the next 
   }
 });
 
+test("a receipts reply over 16 MiB is read whole, so filling a block with logs cannot stop a scan", async () => {
+  // ethrex leaves Alice's second payment out of eth_getLogs, so the scan reads its block's
+  // receipts. Anyone can fill that block with logs: here one frame transaction of 42,000 empty
+  // logs, about what EIP-7825's 2^24 gas buys, which ethrex lists in its frame and again in its
+  // top-level logs. That one receipt passes rpc()'s 16 MiB cap, which receipts are exempt from.
+  const chain = new Chain();
+  const toAlice = n.directChannel(ALICE.ownerPk, ALICE.directSecret(0n));
+  for (const value of [7n, 8n, 9n]) {
+    const { note, cm } = paid(ALICE.ownerPk, toAlice, value);
+    chain.add(n.shieldNotes(note), [cm], [], SHIELD);
+  }
+  const hidden = chain.events[1];
+  const [block, tx] = [hexPadded(hidden.block, 1), hexPadded(hidden.tx + 1n, 1)];
+  const logs = Array.from({ length: 42_000 }, (_, i) => ({
+    address: "0x" + "22".repeat(20),
+    topics: [],
+    data: "0x",
+    blockNumber: block,
+    transactionHash: hexPadded(hidden.block, 64),
+    transactionIndex: tx,
+    blockHash: hexPadded(hidden.block, 64),
+    logIndex: hexPadded(BigInt(i), 1),
+    removed: false,
+  }));
+  const filler = {
+    transactionIndex: tx,
+    status: "0x1",
+    logs,
+    frameReceipts: [{ status: "0x1", logs }],
+  };
+  assert.ok(JSON.stringify(filler).length > 16 * 2 ** 20);
+  const receipts = (block: bigint) => [
+    ...chain.events
+      .filter((e) => e.block === block)
+      .map((e) => ({ transactionIndex: hexPadded(e.tx, 1), status: "0x1", logs: callLogs(e) })),
+    ...(block === hidden.block ? [filler] : []),
+  ];
+  const visible = rpcLogs(chain, [1]);
+  const node = await rpcServer(({ method, params }) => {
+    if (method === "eth_getBlockReceipts") return { result: receipts(BigInt(params[0])) };
+    if (method === "eth_getTransactionReceipt") return { result: filler };
+    const head = { number: hexPadded(chain.events.at(-1)!.block, 1) };
+    return { result: { eth_chainId: hexPadded(CHAIN, 1), eth_getLogs: visible }[method] ?? head };
+  });
+  try {
+    const scanner = new Scanner(ALICE, CHAIN, POOL);
+    const rpcChain = new RpcChain(node.url);
+    await scanToFinalized(scanner, rpcChain, 0n);
+    const read = node.requests.filter((r) => r.method === "eth_getBlockReceipts");
+    assert.ok(read.some((r) => BigInt(r.params[0]) === hidden.block));
+    assert.deepEqual(
+      scanner.unspent().map((note) => note.value),
+      [7n, 8n, 9n],
+    );
+    const receipt = await rpcChain.call("eth_getTransactionReceipt", [hexPadded(1n, 64)]);
+    assert.equal((receipt as typeof filler).logs.length, 42_000);
+  } finally {
+    await node.close();
+  }
+});
+
 test("state upgrade: a rescan through a node that serves nothing of epoch 0 stops", async () => {
   // The earlier version missed Alice's payment in epoch 0's last leaf. This node serves nothing
   // of epoch 0 but that payment's receipt, so the rescan's first leaf in logs is epoch 1's first.
