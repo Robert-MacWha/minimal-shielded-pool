@@ -91,7 +91,14 @@ export function settleCalldata(entry: unknown, rootSlot: unknown): Uint8Array {
 /** shield(inner, note) calldata with the note the wallet made for the new leaf. */
 export function shieldCalldata(inner: unknown, entry: unknown): Uint8Array {
   const note = notesField(entry, "note", "shield");
-  return protocol.encodeShield(word32(inner, "the shield's inner"), note);
+  const value = word32(inner, "the shield's inner");
+  const calldata = protocol.encodeShield(value, note);
+  // The pool accepts any inner below p, but no one can open 0 or a sink inner, so a deposit to
+  // one is locked for good.
+  if (value === 0n || protocol.SINK_INNERS.includes(value)) {
+    throw new PoolError("the shield's inner is 0 or a sink inner, which no one can spend");
+  }
+  return calldata;
 }
 
 /** A fixture spend entry's Groth16 proof and hybrid compression's beta. */
