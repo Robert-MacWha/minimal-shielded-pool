@@ -147,9 +147,13 @@ public, and these patterns can still link a spend to a deposit or another spend:
   nothing at the testnet's base fee.
 - Fees, gas limits and fourth frames differ between wallets and mark their
   spends.
-- A sender's first payment to a public address carries a 1,088-byte ML-KEM
-  ciphertext, which shows that someone paid a public address for the first
-  time.
+- A payment that opens a channel to a public address carries a 1,088-byte
+  ML-KEM ciphertext, which shows that someone opened one. A sender opens a
+  channel on its first payment to an address, after a restore, and when it
+  pays again before the opening payment is final.
+- The recipient sees which channel each payment arrives on, so it links every
+  payment on one channel to one sender, and to the sender's account when a
+  shield opened the channel.
 - A disclosure receipt shows its links and amounts to whoever holds it, and
   disclosing both inputs and one output of a spend reveals the other output's
   value. If that output is later withdrawn in full, the amount links the
@@ -170,6 +174,9 @@ public, and these patterns can still link a spend to a deposit or another spend:
 
 The pool does not check what a note says, so a wrong note only hides a payment
 from its recipient, and the sender can deliver the opening another way. A
+public address has no checksum: a mistyped `owner_pk` is a valid key nobody
+holds, so a payment to it is lost, and a mistyped ML-KEM key usually still
+loads and hides the payment. Copy an address whole; never retype it. A
 repeated index links two payments and reveals the XOR of their amounts, so a
 wallet must save each reservation before broadcasting
 ([README](README.md#note-delivery)). One device sends from an account at a
@@ -254,9 +261,9 @@ archive, which nobody guarantees to keep.
 
 What the tests check is in the header of each TypeScript test file,
 [docs/design.md](docs/design.md#the-client-and-its-cross-checks) and
-[test/native/README.md](test/native/README.md). The September 2026 testnet
-runs are in the [README](README.md#deployment), and earlier dated runs are
-under the [`evidence-archive`](https://github.com/soispoke/minimal-shielded-pool/tree/evidence-archive/evidence) tag. The tests and runs show compatibility
+[test/native/README.md](test/native/README.md). The September and October 2026
+testnet runs are in the [README](README.md#deployment), and earlier dated runs
+are under the [`evidence-archive`](https://github.com/soispoke/minimal-shielded-pool/tree/evidence-archive/evidence) tag. The tests and runs show compatibility
 with one testnet configuration, not production readiness.
 
 ## Reporting

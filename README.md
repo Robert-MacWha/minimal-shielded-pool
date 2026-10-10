@@ -209,7 +209,8 @@ The proof names a secp256k1 authorizer, which the wallet makes fresh for each
 spend. Its signature covers the
 whole transaction, including the proof, the recent-root tuple and the fourth
 frame. The proof's `fee` must cover the transaction's maximum cost; any unused
-part stays in the pool.
+part stays in the pool for good, and the October 2026 testnet spends used only
+14% to 44% of their maximum cost at the default limits.
 
 The wallet chooses the fourth frame's limits. Intrinsic gas plus every frame's
 execution limit, or the calldata floor when larger, must fit EIP-7825's `2^24`
@@ -296,11 +297,11 @@ its direct secrets. `scan` and `direct-secret` need the config of a
 
 `scan` reads finalized blocks only and keeps its state in an owner-only file.
 It reads every shield and settlement apart, even several in one transaction. A
-node may leave a call's logs out of `eth_getLogs`, as ethrex does for every log
-of a frame transaction whose fourth frame failed. Once a later leaf shows the
-gap, or begins a new epoch before the last one was seen full, `scan` rebuilds
-the call from block receipts, and it stops if leaves are still missing rather
-than hide notes ([one exception](SECURITY.md#note-delivery)). `direct-secret`
+node may leave a call's logs out of `eth_getLogs`, as ethrex `247e2dd2` does for
+every log of a frame transaction whose fourth frame failed. Once a later leaf
+shows the gap, or begins a new epoch before the last one was seen full, `scan`
+rebuilds the call from block receipts, and it stops if leaves are still missing
+rather than hide notes ([one exception](SECURITY.md#note-delivery)). `direct-secret`
 needs a state that has been scanned, and hands out numbers only within 20 of
 the highest one paid, which is how far a scan from the seed looks. History
 older than Ethereum's retention window (EIP-4444) comes from archives, as it
@@ -478,6 +479,11 @@ unconstrained signal.
 The tests rebuild the circuit and require byte-identical R1CS and WASM. The
 committed artifacts come from circom2 0.2.8; 0.2.23 does not reproduce them
 byte for byte, so a compiler upgrade means a new reviewed artifact set.
+circom's optimizer removes the private `fee` input, which conservation
+determines, yet the R1CS header still counts 96 private inputs. A tool that
+reads private inputs by position (wires 4 to 99) therefore takes wire 99, the
+first nullifier, for one of them. Map wires by name through a `--sym` build, as
+`test/circuit.test.ts` does.
 `tools/setup.sh` runs a new single-party test setup, not a ceremony. Run it
 only to replace the test setup on purpose, then rebuild the activation manifest
 and proof fixtures. The activation gate checks that the proving key's A and B
