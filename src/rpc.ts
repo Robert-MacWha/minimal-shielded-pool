@@ -84,18 +84,27 @@ export async function rpc(
 // to this cap.
 const MAX_REPLY_BYTES = 16 * 2 ** 20;
 
-/** The body as text, or null once it passes limit bytes, after which the rest is not read. */
+/**
+ * The body as text, or null once it passes limit bytes, after which the rest is not read. Each
+ * part is copied out as it arrives: a body sent in millions of one-byte parts would otherwise
+ * hold an object per byte.
+ */
 async function cappedText(response: Response, limit: number): Promise<string | null> {
-  const parts: Uint8Array[] = [];
+  let body = new Uint8Array(4096);
   let size = 0;
   for await (const part of response.body ?? []) {
-    size += part.length;
     // Leaving the loop cancels the stream.
-    if (size > limit) return null;
-    parts.push(part);
+    if (size + part.length > limit) return null;
+    if (size + part.length > body.length) {
+      const larger = new Uint8Array(Math.min(limit, 2 * (size + part.length)));
+      larger.set(body.subarray(0, size));
+      body = larger;
+    }
+    body.set(part, size);
+    size += part.length;
   }
   // As response.text() decodes: UTF-8, a leading byte order mark dropped.
-  return new TextDecoder().decode(Buffer.concat(parts));
+  return new TextDecoder().decode(body.subarray(0, size));
 }
 
 // Node's error codes (ECONNREFUSED, ENOTFOUND) and fetch's own reasons ("unexpected
