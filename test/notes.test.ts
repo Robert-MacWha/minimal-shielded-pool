@@ -1051,7 +1051,7 @@ test("CLI: a node's oversized reply is refused before parsing, and the state loc
     const state = join(dir, "state.json");
     const config = writeConfig(dir, node.url);
     const scan = ["scan", "--config", config, "--state", state, "--seed-file", SEED];
-    await cli(scan, "the reply is larger than 16 MiB");
+    await cli(scan, "the reply is larger than 16 MiB; pass a smaller --chunk");
     assert.equal(existsSync(`${state}.lock.d`), false);
   } finally {
     await node.close();

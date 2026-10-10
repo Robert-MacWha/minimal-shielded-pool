@@ -65,7 +65,7 @@ export async function rpc(
     throw fail(transportReason(error, timeoutMs));
   }
   if (!response.ok) throw fail(`HTTP ${response.status}`);
-  if (text === null) throw fail(`the reply is larger than ${MAX_REPLY_BYTES >> 20} MiB`);
+  if (text === null) throw fail(TOO_LARGE);
   let reply: unknown;
   try {
     reply = parse(text);
@@ -83,6 +83,8 @@ export async function rpc(
 // the process, skipping the exit handlers that release a wallet's state lock. A reply is read up
 // to this cap.
 const MAX_REPLY_BYTES = 16 * 2 ** 20;
+/** rpc()'s reason for refusing a reply past the cap. */
+export const TOO_LARGE = `the reply is larger than ${MAX_REPLY_BYTES >> 20} MiB`;
 
 /**
  * The body as text, or null once it passes limit bytes, after which the rest is not read. Each

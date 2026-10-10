@@ -219,11 +219,17 @@ appends no leaf, so it leaves no gap: its note shows as unspent, and spending
 it fails. A node that also leaves a call out of its receipts makes `scan` stop,
 except for a call in an epoch's last leaf when a two-leaf settlement began the
 next epoch: the pool also closes an epoch one leaf short before such a
-settlement, so nothing shows the gap. A node can also alter the logs it
-returns instead of leaving them out, and `scan` cannot detect that: a changed
-opening ciphertext hides every payment on that channel, and a later scan of the
-same state with another node does not read those blocks again. Scan with a node
-you trust; to check one, scan into a new state file with another node.
+settlement, so nothing shows the gap. The client refuses any node reply over 16
+MiB before parsing it. When one `eth_getLogs` range holds more than about 5,000
+ML-KEM shields, `scan` needs a smaller `--chunk`. Receipts are read one block
+per call, so when `scan` reads them, as it does after a gap in the leaves or an
+epoch seen one leaf short, it stops at any block whose receipts pass 16 MiB,
+which anyone can cause by filling a block with logs. A node can also alter the
+logs it returns instead of leaving them out, and `scan` cannot detect that: a
+changed opening ciphertext hides every payment on that channel, and a later
+scan of the same state with another node does not read those blocks again. Scan
+with a node you trust; to check one, scan into a new state file with another
+node.
 Earlier versions of `scan` read no receipts when a new epoch began, so a state
 file they saved can lack a payment in an epoch's last leaves. When such a file
 shows an epoch that closed short of full, the next `scan` rescans from the

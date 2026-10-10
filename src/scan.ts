@@ -37,7 +37,7 @@ import {
 } from "./notes.ts";
 import * as protocol from "./protocol.ts";
 import { LEAF_APPENDED, NOTES, NOTE_SPENT, TREE_CAPACITY } from "./protocol.ts";
-import type { RpcChain } from "./rpc.ts";
+import { ChainError, TOO_LARGE, type RpcChain } from "./rpc.ts";
 
 const STATE_VERSION = 3;
 const POOL_TOPICS: readonly string[] = [LEAF_APPENDED, NOTE_SPENT, NOTES];
@@ -489,7 +489,14 @@ async function* fetchLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint, ch
     const end = start + step - 1n < to ? start + step - 1n : to;
     const range = { fromBlock: hexPadded(start, 1), toBlock: hexPadded(end, 1) };
     const filter = { address: hexPadded(pool, 40), topics: [POOL_TOPICS], ...range };
-    yield asList(await chain.call("eth_getLogs", [filter]), "eth_getLogs's result");
+    const found = await chain.call("eth_getLogs", [filter]).catch((error: unknown) => {
+      // An honest chunk passes rpc()'s cap once it holds about 5,000 ML-KEM shields.
+      if (error instanceof ChainError && error.message.endsWith(TOO_LARGE)) {
+        throw new ChainError(`${error.message}; pass a smaller --chunk`, { cause: error });
+      }
+      throw error;
+    });
+    yield asList(found, "eth_getLogs's result");
   }
 }
 
