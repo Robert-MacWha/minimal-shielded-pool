@@ -12,6 +12,7 @@ import { inspect, parseArgs as parseArgv, type ParseArgsOptionsConfig } from "no
 
 import { parseDec, parseUint } from "../bytes.ts";
 import { InputError, UserError } from "../errors.ts";
+import { printable } from "../json.ts";
 
 /** The text with every run of 64 or more hex digits, which may be a key, redacted. */
 export function redact(text: string): string {
@@ -231,7 +232,8 @@ export async function runCli(
     } else {
       const system = error instanceof Error && "syscall" in error;
       const refusal = error instanceof UserError || system;
-      const text = refusal ? prefix + (error as Error).message : inspect(error);
+      // A refusal can quote a node's answer, so control characters are escaped.
+      const text = printable(refusal ? prefix + (error as Error).message : inspect(error));
       process.stderr.write((redactErrors || system ? redact(text) : text) + "\n");
       process.exitCode = 1;
     }

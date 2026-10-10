@@ -3,8 +3,9 @@
  * other profile labels before any RPC; a pool whose deployed code, linked verifier or domain do
  * not match; a shield whose fixture cannot spend the funded note; and unknown or misplaced
  * flags. It also checks that the flags it accepts reach the sender, that the funded key is read
- * from standard input or a prompt that does not echo it, and that a key given as an argument is
- * refused without being printed. Runs in about 2 s, most of it in 49 CLI subprocesses that pin
+ * from standard input or a prompt that does not echo it, that a key given as an argument is
+ * refused without being printed, and that control characters in a node's answer are escaped
+ * before they reach the terminal. Runs in about 2 s, most of it in 53 CLI subprocesses that pin
  * the exit statuses.
  *
  *   node --test test/pool-cli.test.ts
@@ -339,6 +340,21 @@ test("the CLI redacts a key-like path from its refusal", async () => {
   ]);
   assert.equal(code, 1, stderr);
   assert.ok(stderr.includes("<redacted>.json is not JSON") && !stderr.includes(key), stderr);
+});
+
+// A hostile node's error text could otherwise rewrite the screen or set the clipboard (OSC 52).
+test("the CLI escapes control characters in a node's answer", async () => {
+  const hostile = "\x1b]52;c;QUFB\x07\x1b[2K\r\u009b2K";
+  const server = await rpcServer(() => ({ error: hostile }));
+  try {
+    const config = path("core/deploy_config.json");
+    const { code, stderr } = await runPoolCli([server.url, config, FIXTURE, "shield"]);
+    assert.equal(code, 1, stderr);
+    assert.ok(!/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(stderr), JSON.stringify(stderr));
+    assert.ok(stderr.includes("\\u001b]52;c;QUFB\\u0007"), stderr);
+  } finally {
+    await server.close();
+  }
 });
 
 // The pool CLI reads the funded key from standard input. In the position where it once took the

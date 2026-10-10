@@ -131,6 +131,19 @@ const SHORT_ESCAPES: Record<string, string> = {
   "\f": "\\f",
 };
 
+/**
+ * The text with every C0 and C1 control character except newline and tab written as \uXXXX.
+ * Text a node or a received file supplied goes through this before reaching a terminal, where
+ * escape sequences could rewrite the screen or set the clipboard (OSC 52). JSON.stringify
+ * escapes C0 controls only.
+ */
+export function printable(text: string): string {
+  return text.replace(
+    /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g,
+    (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
+  );
+}
+
 function asciiString(text: string): string {
   const escaped = text.replace(
     /["\\]|[^ -~]/g,

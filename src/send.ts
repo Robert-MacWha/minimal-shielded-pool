@@ -22,7 +22,7 @@ import {
   type FrameTx,
 } from "./frametx.ts";
 import * as gas from "./gas.ts";
-import { isObject, stringify, type JsonObject } from "./json.ts";
+import { isObject, printable, stringify, type JsonObject } from "./json.ts";
 import type { PoolNode } from "./rpc.ts";
 import {
   checkTxResourceLimits,
@@ -62,9 +62,10 @@ export interface SendIo {
 /** A spend's fourth frame: a custom action, a withdrawal's default claim, or none. */
 export type TailKind = "action" | "claim" | null;
 
-// A node value in a progress line: a string as it is, anything else as JSON.
+// A node value in a progress line: a string as it is, anything else as JSON, with control
+// characters escaped either way.
 const show = (value: unknown): string =>
-  typeof value === "string" ? value : stringify(value ?? null);
+  printable(typeof value === "string" ? value : stringify(value ?? null));
 const grouped = (value: bigint | null): string =>
   value === null ? "null" : value.toLocaleString("en-US");
 
