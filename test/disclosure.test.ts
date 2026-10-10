@@ -336,6 +336,12 @@ test("what a receipt shows about origins, completeness and positions", async () 
   Object.assign(shielded.notes[0], { created: "0xtransfer" });
   const [second] = (await verify(moved, shielded)).notes;
   assert.equal(second.origin, "deposit made from 0xtransfer's fourth frame");
+  // The fourth frame runs even when the settlement before it failed, and its deposit is real.
+  const unsettled = chain.copy();
+  unsettled.txs.get("0xwithdraw")!.frames[0].status = 0n;
+  Object.assign(shielded.notes[0], { created: "0xwithdraw" });
+  const [third] = (await verify(unsettled, shielded)).notes;
+  assert.equal(third.origin, "deposit made from 0xwithdraw's fourth frame");
   // A disclosed input with its partner hidden leaves the spend unexplained.
   assert.equal((await verify(chain, deposit)).spends.get("0xtransfer")!.complete, false);
   // An input names its leaf and epoch; a note known only by commitment covers each leaf it
