@@ -301,6 +301,8 @@ interface SendCase {
   fees?: { maxFee?: bigint; maxPriorityFee?: bigint };
   /** A call moving 5 wei to the pool from key 1's account, in place of the spend. */
   call?: boolean;
+  /** The call keeps the default SENDER limit, as a shield does. */
+  fixedGas?: boolean;
   balance?: string;
   dryRun?: boolean;
 }
@@ -341,7 +343,7 @@ async function sendCase(options: SendCase): Promise<{ error: unknown; sent: Uint
     simulate: async () => simulations.shift(),
   };
   const send = o.call
-    ? ({ kind: "call", value: 5n, calldata: CALLDATA } as const)
+    ? ({ kind: "call", value: 5n, calldata: CALLDATA, fixedGas: o.fixedGas } as const)
     : ({
         kind: "spend",
         settle: o.settle,
@@ -566,11 +568,12 @@ describe("calls", () => {
     assert.deepEqual(fields.slice(1, 3), [rlpList([rlpInt(0n)]), rlpInt(1n)]);
   });
 
-  test("a call's SENDER limit is measured gas plus 25%, or the default if that fails", async () => {
+  test("a call's SENDER limit is measured gas plus 25%, or the default for a shield or if that fails", async () => {
     const sized: [SendCase, bigint][] = [
       [{}, 1_310_720n], // 0x100000 plus 25%
       [{ resized: simulated("+-").simulation }, gas.SETTLE_FRAME_GAS],
       [{ simulation: null }, gas.SETTLE_FRAME_GAS],
+      [{ fixedGas: true }, gas.SETTLE_FRAME_GAS],
     ];
     for (const [change, senderGas] of sized) {
       const { error, sent } = await sendCase({ ...CALL, ...change });

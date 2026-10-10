@@ -608,7 +608,7 @@ describe("shield binds the fixture and reads the funded key", () => {
     config = cfg,
     extra = [],
     stdin = FUNDED + "\n",
-  }: Shield): Promise<{ error: unknown; keys: Uint8Array[] }> {
+  }: Shield): Promise<{ error: unknown; keys: Uint8Array[]; sent: Send[] }> {
     const node: PoolNode = {
       async call(method, params) {
         const request = params[0] as { to: string; data: string };
@@ -620,15 +620,20 @@ describe("shield binds the fixture and reads the funded key", () => {
     };
     const receipt = { logs: [leafLog(fixture.pool_address, ...landed)] };
     const keys: Uint8Array[] = [];
+    const sent: Send[] = [];
     const files = [writeTemp("config.json", config), writeTemp("fixture.json", fix)];
     const argv = ["http://node", ...files, "shield", ...extra];
     const deps: Parameters<typeof main>[1] = {
       node,
       checkDeployedProfile: async () => {},
-      buildAndSend: async (_node, _io, key) => (keys.push(key), receipt),
+      buildAndSend: async (_node, _io, key, _pool, send) => {
+        keys.push(key);
+        sent.push(send);
+        return receipt;
+      },
     };
     const error = await withStdin(Readable.from([Buffer.from(stdin)]), () => runMain(argv, deps));
-    return { error, keys };
+    return { error, keys, sent };
   }
 
   const otherPool = "0x" + (pool ^ 1n).toString(16).padStart(40, "0");
@@ -704,11 +709,13 @@ describe("shield binds the fixture and reads the funded key", () => {
   ];
   for (const [label, options, landed] of sends) {
     test(label, async () => {
-      const { error, keys } = await shield(options);
+      const { error, keys, sent } = await shield(options);
       if (landed === null) assert.equal(error, null);
       else refused(error, [`landed at (epoch, leaf) ${landed}`, "Keep this fixture"], label);
       // The funded key comes from standard input, never the command line.
       assert.deepEqual(keys.map(toHex), ["0x" + FUNDED]);
+      // A shield keeps the default SENDER limit, since a deposit landing first can make it dearer.
+      assert.ok(sent.length === 1 && sent[0].kind === "call" && sent[0].fixedGas === true);
     });
   }
 

@@ -41,7 +41,12 @@ const get = (value: unknown, key: string): unknown => (isObject(value) ? value[k
 
 /** What to send: an ordinary call from the funded account, or a spend the pool pays for. */
 export type Send =
-  | { readonly kind: "call"; readonly value: bigint; readonly calldata: Uint8Array }
+  | {
+      readonly kind: "call";
+      readonly value: bigint;
+      readonly calldata: Uint8Array;
+      readonly fixedGas?: boolean; // keep the default SENDER limit, as a shield does
+    }
   | {
       readonly kind: "spend";
       readonly settle: Uint8Array;
@@ -186,7 +191,9 @@ export function spendVerdict(
 /**
  * Builds, simulates and sends a call or a spend and returns its receipt, or null after a dry
  * run. A spend keeps its SENDER limit: EIP-8037 state accounting varies too much for measured
- * gas plus 25% to be a safe margin.
+ * gas plus 25% to be a safe margin. So does a call with fixedGas, which a shield sets: inserting
+ * its leaf costs one more hash for each trailing 1 bit of the leaf's index, and a deposit or
+ * settlement landing between simulation and inclusion can move it to a dearer leaf.
  */
 export async function buildAndSend(
   node: PoolNode,
@@ -318,7 +325,8 @@ export async function buildAndSend(
     }
     // Only a reported success is a size; a call whose status is missing keeps the default limit.
     const used = sim.frames.at(-1)?.gasUsed ?? null;
-    if (used !== null && status === "success") {
+    const fixedGas = send.kind === "call" && send.fixedGas === true;
+    if (!fixedGas && used !== null && status === "success") {
       const sized = maxBigint(used + used / 4n, CALL_VERIFY_FRAME_GAS);
       const resized = build(sized);
       const check = simulation(await node.simulate(toHex(rawTx(resized))));
