@@ -305,6 +305,8 @@ interface SendCase {
   fixedGas?: boolean;
   balance?: string;
   dryRun?: boolean;
+  /** Collects the progress lines. */
+  lines?: string[];
 }
 /** A withdrawal with its default claim. */
 const CLAIM: SendCase = { action: null, settle: settlement(5n, ACCOUNT) };
@@ -352,7 +354,7 @@ async function sendCase(options: SendCase): Promise<{ error: unknown; sent: Uint
         action: o.action,
         allowFailedClaim: o.allowFailedClaim,
       } as const);
-  const io = { log: () => {}, sleep: async () => {} };
+  const io = { log: (line: string) => void o.lines?.push(line), sleep: async () => {} };
   const sendOptions = { ...o.fees, dryRun: o.dryRun };
   const error = await buildAndSend(node, io, toBytes(1n, 32), POOL, send, sendOptions).then(
     () => null,
@@ -546,6 +548,16 @@ describe("the spend verdict", () => {
       else assert.ok(verdict.refusal?.includes(refusal), `${refusal} not in ${verdict.refusal}`);
     });
   }
+});
+
+test("a node's control characters in a progress line are escaped", async () => {
+  const lines: string[] = [];
+  const hostile = "\x1b]52;c;QUFB\x07\u009b2K";
+  const { error } = await sendCase({ ...simulated("++++", true, hostile), dryRun: true, lines });
+  assert.equal(error, null);
+  const text = lines.join("\n");
+  assert.ok(text.includes("\\u001b]52;c;QUFB\\u0007\\u009b2K"), text);
+  assert.ok(!/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(text), JSON.stringify(text));
 });
 
 describe("calls", () => {

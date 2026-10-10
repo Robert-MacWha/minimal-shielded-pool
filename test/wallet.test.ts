@@ -159,5 +159,6 @@ test("an output inner past p is refused, so an alias of a sink inner cannot slip
   assert.throws(() => spend([3n, 3n], [P + 2n, 2n]), /must be in \[0, p\)/);
   assert.throws(() => spend([P + 1n, 0n], [3n, 5n]), /must be in \[0, p\)/);
   assert.throws(() => spend([-1n, 3n], [3n, 2n]), /must be in \[0, p\)/);
+  assert.throws(() => spend([P, 3n], [3n, 2n]), /must be in \[0, p\)/);
   assert.deepEqual(spend([P - 1n, 3n], [3n, 2n]).out_inner, [String(P - 1n), "3"]);
 });

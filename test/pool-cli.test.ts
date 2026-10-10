@@ -662,7 +662,8 @@ describe("shield binds the fixture and reads the funded key", () => {
     ["no recorded pool", { fix: unpooled }, "record pool_address"],
     // No one can open these inners, so the pool would lock the deposit.
     ["inner 0", { fix: { ...fixture, inner_a: hex32(0n) } }, "which no one can spend"],
-    ["a sink inner", { fix: { ...fixture, inner_a: hex32(2n) } }, "which no one can spend"],
+    ["sink inner 1", { fix: { ...fixture, inner_a: hex32(1n) } }, "which no one can spend"],
+    ["sink inner 2", { fix: { ...fixture, inner_a: hex32(2n) } }, "which no one can spend"],
     ["a pool that already holds a leaf", { state: [0n, 1n, 5n] }, "next leaf is epoch 0 leaf 1"],
     ["a pool in a later epoch", { state: [1n, 0n, EMPTY_ROOT] }, "next leaf is epoch 1 leaf 0"],
     // Its recipient could not find the note.

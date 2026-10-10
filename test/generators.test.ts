@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
+import fs, {
   chmodSync,
   closeSync,
   existsSync,
@@ -27,6 +27,7 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,6 +175,32 @@ test("secret files are owner-only and never replace another run's fixture", () =
   assert.throws(() => readJson(seed), { message: `${seed} is not JSON: Unexpected token` });
   const left = readdirSync(dir).filter((name) => name.startsWith("."));
   assert.deepEqual(left, [], "temporary file left behind");
+});
+
+test("a save syncs its directory, so a crash cannot bring back the earlier file", () => {
+  // A rename is atomic but durable only once its directory is synced. Only a crash shows the
+  // difference, so the syncs are counted.
+  const dir = realpathSync(mkdtempSync(join(TMP, "durable-")));
+  const { openSync: open, fsyncSync: fsync } = fs;
+  const opened = new Map<number, string>();
+  const synced: string[] = [];
+  fs.openSync = (...args: Parameters<typeof open>) => {
+    const fd = open(...args);
+    opened.set(fd, String(args[0]));
+    return fd;
+  };
+  fs.fsyncSync = (fd: number) => (synced.push(opened.get(fd) ?? ""), fsync(fd));
+  syncBuiltinESMExports();
+  try {
+    const state = join(dir, "state.json");
+    writePrivate(state, "{}", null);
+    writePrivate(state, "{}", fileIdentity(state));
+    writePrivate(state, "{}");
+  } finally {
+    Object.assign(fs, { openSync: open, fsyncSync: fsync });
+    syncBuiltinESMExports();
+  }
+  assert.equal(synced.filter((path) => path === dir).length, 3);
 });
 
 test("an --output path follows links as the kernel does", () => {

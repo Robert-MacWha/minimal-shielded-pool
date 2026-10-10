@@ -469,9 +469,12 @@ test("log decoding: every wallet reads a transaction's calls apart; bad logs are
   raises(() => eventsFromLogs(logs.filter((l) => l !== lastNotes)), "has no Notes log");
   const firstSpent = logs.find((l) => l.topics[0] === NOTE_SPENT);
   raises(() => eventsFromLogs(logs.filter((l) => l !== firstSpent)), "missing pool logs");
+  const firstLeaf = logs.find((l) => l.topics[0] === LEAF_APPENDED);
+  raises(() => eventsFromLogs(logs.filter((l) => l !== firstLeaf)), "missing pool logs");
   // Notes data with another offset, or a length no call emits, is malformed.
   const word = (value: bigint) => hex32(value).slice(2);
-  for (const data of [word(64n) + "00".repeat(64), word(32n) + word(97n) + "00".repeat(97)]) {
+  const offset64 = word(64n) + word(48n) + "00".repeat(48);
+  for (const data of [offset64, word(32n) + word(97n) + "00".repeat(97)]) {
     raises(() => decodeNotesData("0x" + data), "malformed Notes log");
   }
 });
@@ -858,6 +861,8 @@ test("a finalized head behind the state's last scan is refused, not taken as not
     const scanner = new Scanner(ALICE, CHAIN, POOL);
     await scanToFinalized(scanner, new RpcChain(node.url), 0n, Number.MAX_SAFE_INTEGER);
     assert.equal(scanner.scannedBlock, 10n ** 12n);
+    finalized.block = 10n ** 12n - 1n;
+    await assert.rejects(scanToFinalized(scanner, new RpcChain(node.url), 0n), /is behind block/);
     finalized.block = chain.events.at(-1)!.block;
     await assert.rejects(scanToFinalized(scanner, new RpcChain(node.url), 0n), /is behind block/);
   } finally {
