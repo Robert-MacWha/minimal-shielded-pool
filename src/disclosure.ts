@@ -413,9 +413,12 @@ async function prefixed<T>(prefix: string, kinds: (typeof UserError)[], body: ()
   }
 }
 
+// One spelling per hash: a node such as ethrex also takes a hash without 0x, and the report keys
+// spends by spelling, so a second spelling would list one spend twice.
 function lower(value: unknown, what: string): string {
-  if (typeof value !== "string") throw new InputError(`${what} must be a transaction hash`);
-  return value.toLowerCase();
+  const hash = typeof value === "string" ? value.toLowerCase() : "";
+  if (!hash.startsWith("0x")) throw new InputError(`${what} must be a 0x transaction hash`);
+  return hash;
 }
 
 /**

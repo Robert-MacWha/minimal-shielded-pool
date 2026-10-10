@@ -263,6 +263,9 @@ test("a malformed or foreign receipt is rejected, and hash case does not matter"
   await rejected(chain, { ...receipt, pool: "0x1111" }, "another pool than the config");
   await rejected(chain, { ...receipt, notes: [{ cm: "0x1" }] }, "malformed");
   await rejected(chain, [receipt], "malformed");
+  // ethrex also finds a hash written without 0x; a second spelling would list its spend twice.
+  const unprefixed = { ...noteOf(receipt, "a"), spent: "0xtransfer".slice(2) };
+  await rejected(chain, { ...receipt, notes: [unprefixed] }, "must be a 0x transaction hash");
   const shouting = structuredClone(receipt);
   for (const n of shouting.notes as Record<string, unknown>[]) {
     for (const k of ["created", "spent"]) {
