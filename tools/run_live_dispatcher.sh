@@ -33,6 +33,10 @@ SMOKE_OUTPUT=${SMOKE_OUTPUT:-../artifacts/smoke_fixture.live.json}
 # .env files and the global config, and every check below compares the chain with
 # that same local build. Compare what forge would use with the manifest's pins.
 node check-forge-config.ts "$MANIFEST" "$BN"
+# The commit the record names, read before this script rewrites core/deploy_config.json;
+# "-dirty" marks tracked files that differ from it.
+REVISION=$(git rev-parse HEAD)
+git diff --quiet HEAD || REVISION+=-dirty
 deployed() { grep -oE 'Deployed to: 0x[0-9a-fA-F]{40}' | awk '{print $3}'; }
 # -e fails on a missing or null address instead of printing "null".
 addr_of() { jq -er '.contractAddress'; }
@@ -208,7 +212,6 @@ echo "==> publish authenticated post-shield root"
 ROOT_SLOT_DEC=$(publish_root) || exit 1
 [[ -n $ROOT_SLOT_DEC ]] || { echo "publishEpochRoot did not emit ROOT_SLOT" >&2; exit 1; }
 
-REVISION=$(git rev-parse HEAD)
 MANIFEST_PATH=$MANIFEST node - "$RPC" "$POOL" "$VERIFIER" "$T3" "$T4" "$LOGIC" "$SOURCE0" "$DOMAIN" "$ROOT_SLOT_DEC" "$REVISION" "$POOL_BLOCK" <<'JS'
 const fs = require("node:fs");
 const keys = ["rpc", "pool", "verifier", "poseidonT3", "poseidonT4", "logic",
