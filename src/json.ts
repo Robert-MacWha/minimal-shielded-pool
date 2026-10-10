@@ -132,10 +132,12 @@ const SHORT_ESCAPES: Record<string, string> = {
 };
 
 /**
- * The text with every C0 and C1 control character except newline and tab written as \uXXXX.
- * Text a node or a received file supplied goes through this before reaching a terminal, where
- * escape sequences could rewrite the screen or set the clipboard (OSC 52). JSON.stringify
- * escapes C0 controls only.
+ * The text with DEL and every C0 and C1 control character except newline and tab written as
+ * \uXXXX. runCli passes each refusal or error it reports with status 1 through this, and send.ts
+ * each node value in a progress line, since escape sequences from a node could rewrite the
+ * screen or set the clipboard (OSC 52). JSON.stringify escapes C0 controls only, so the report
+ * disclosure verify prints as JSON, without this, can still carry C1 controls in the transaction
+ * hashes a receipt names.
  */
 export function printable(text: string): string {
   return text.replace(
