@@ -20,3 +20,6 @@ __pycache__/
 
 # The formal verification repository, checked out here to run its checks.
 /formal/
+
+.direnv
+.envrc
