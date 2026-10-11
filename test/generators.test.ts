@@ -21,6 +21,7 @@ import fs, {
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -247,13 +248,18 @@ test("a lock whose holder died on this host is taken over, and no other lock is"
   const takeover = `${lock}.takeover`;
   const record = diedHolding(state);
   const attempt = () => withLock(state, () => {}, { waitMs: 0 });
-  const refusal = (held: string) => (error: Error) =>
-    error.message.startsWith(`${held} is held by another run`);
+  // A refusal says what holds the lock and what to remove.
+  const refusal = (held: string, remove = "it") => ({
+    message: `${held}; if no other run is active, remove ${remove} and try again`,
+  });
   // The same lock naming this live process, pid 1, which only root may signal, another host or
   // another pid namespace, or with its record missing, perhaps not written yet, or cut short, is
   // held. So is a record whose pid is not a positive safe integer, such as minus the dead pid,
   // which process.kill would read as a process group that does not exist.
   const holder = parse(record) as { pid: number; host: string; pidns: string | null };
+  // On Linux the record names the holder's pid namespace, here the test's own; elsewhere none.
+  const namespace = existsSync("/proc/self/ns/pid") ? readlinkSync("/proc/self/ns/pid") : null;
+  assert.equal(holder.pidns, namespace);
   const held = [
     { ...holder, pid: process.pid },
     { ...holder, pid: 1 },
@@ -264,17 +270,17 @@ test("a lock whose holder died on this host is taken over, and no other lock is"
   for (const text of [...held.map((h) => JSON.stringify(h)), null, record.slice(0, -1)]) {
     if (text === null) rmSync(join(lock, "holder.json"));
     else writeFileSync(join(lock, "holder.json"), text);
-    await assert.rejects(attempt(), refusal(lock));
+    await assert.rejects(attempt(), refusal(`${lock} is held by another run`));
   }
   writeFileSync(join(lock, "holder.json"), record);
   // A takeover directory left by a run that stopped inside it is named in the refusal, also
   // when the lock's holder is alive.
   mkdirSync(takeover);
-  await assert.rejects(attempt(), refusal(takeover));
+  const busy = `${takeover} is held by another run taking over ${lock}`;
+  await assert.rejects(attempt(), refusal(busy));
   writeFileSync(join(lock, "holder.json"), JSON.stringify(held[0]));
-  await assert.rejects(attempt(), (error: Error) =>
-    error.message.startsWith(`${lock} is held by another run, and ${takeover} is left`),
-  );
+  const left = `${lock} is held by another run, and ${takeover} is left from a takeover`;
+  await assert.rejects(attempt(), refusal(left, "both"));
   writeFileSync(join(lock, "holder.json"), record);
   rmSync(takeover, { recursive: true });
   const mine = await withLock(state, () => readFileSync(join(lock, "holder.json"), "utf8"));

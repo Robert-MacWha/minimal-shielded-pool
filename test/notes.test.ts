@@ -487,6 +487,7 @@ test("16 MiB of hex is read without overflowing the stack, and malformed hex is 
   raises(() => decodeNotesData("0x" + digits), "malformed Notes log");
   // A pasted address goes through the same kind of check, which had the same pattern.
   raises(() => n.Address.decode("0x" + digits), "an address is");
+  for (const text of ["0x0g", "0x0\n"]) raises(() => n.Address.decode(text), "an address is hex");
   assert.deepEqual(fromHex("0x", "data"), new Uint8Array());
   assert.deepEqual(fromHex("0xAbcD", "data"), new Uint8Array([0xab, 0xcd]));
   // Each refused string but "0x0" and "0x000" has an even length, so the pattern refuses it.
