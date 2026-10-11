@@ -10,12 +10,14 @@
 import { randomBytes } from "node:crypto";
 import {
   closeSync,
+  existsSync,
   fstatSync,
   fsyncSync,
   linkSync,
   mkdirSync,
   openSync,
   readFileSync,
+  readlinkSync,
   renameSync,
   rmdirSync,
   statSync,
@@ -163,16 +165,16 @@ export function writeNewPrivate(path: string, text: string): void {
 /**
  * Runs body while holding the lock of a state file, so that two runs on one wallet state
  * cannot overwrite each other's changes or hand out one direct secret twice. The lock is the
- * directory `<state>.lock.d`, created atomically, in which the holder then records its pid and
- * host name. A second run waits for it, up to waitMs, then names the lock so that one it cannot
- * take over can be removed. The lock is also released when the process exits early, which
+ * directory `<state>.lock.d`, created atomically, in which the holder then records its pid,
+ * host name and, on Linux, pid namespace. A second run waits for it, up to waitMs, then names
+ * the lock so that one it cannot take over can be removed. The lock is also released when the process exits early, which
  * runCli makes Ctrl-C, SIGTERM and SIGHUP do.
  *
  * A process that dies without running its exit handlers, as V8 does when the heap runs out,
  * leaves the lock behind, and a later run on the same host takes it over once the recorded pid
- * no longer exists. This assumes that no other machine or container sharing the state's
- * directory has the same host name. A holder on another host, or one that has not recorded
- * itself yet, counts as alive. Takeovers are serialized by a second directory,
+ * no longer exists. This assumes that no other machine sharing the state's directory has the
+ * same host name. A holder on another host or in another pid namespace, such as a container
+ * that keeps this host's name, or one that has not recorded itself yet, counts as alive. Takeovers are serialized by a second directory,
  * `<state>.lock.d.takeover`, under which the run reads the record again and removes the lock
  * only if it still names the same dead holder, so two runs that find one dead lock cannot both
  * take it. A run that stops inside that directory leaves it behind, and the refusal names it.
@@ -193,13 +195,17 @@ export async function withLock<T>(
       if (errorCode(error) !== "EEXIST") throw error;
     }
     let held = `${lock} is held by another run`;
+    let remove = "it";
     const dead = deadHolder(lock);
     if (dead !== null) {
       if (takeOver(lock, takeover, dead)) continue;
       held = `${takeover} is held by another run taking over ${lock}`;
+    } else if (existsSync(takeover)) {
+      held += `, and ${takeover} is left from a takeover`;
+      remove = "both";
     }
     if (Date.now() >= deadline) {
-      throw new InputError(`${held}; if no other run is active, remove it and try again`);
+      throw new InputError(`${held}; if no other run is active, remove ${remove} and try again`);
     }
     await sleep(100);
   }
@@ -210,7 +216,7 @@ export async function withLock<T>(
   };
   process.on("exit", release);
   try {
-    writeFileSync(holder, stringify({ pid: process.pid, host: hostname() }));
+    writeFileSync(holder, stringify({ pid: process.pid, host: hostname(), pidns: PID_NAMESPACE }));
     return await body();
   } finally {
     process.off("exit", release);
@@ -222,8 +228,20 @@ export async function withLock<T>(
 const HOLDER = "holder.json";
 
 /**
- * The text of a lock's holder record when it names this host and a pid that no longer exists,
- * or null. A record that is missing, perhaps not written yet, or unreadable counts as alive, and
+ * This process's pid namespace on Linux, or null where /proc names none. A holder in another
+ * namespace has pids this process cannot see, so its record must never read as dead here.
+ */
+const PID_NAMESPACE = (() => {
+  try {
+    return readlinkSync("/proc/self/ns/pid");
+  } catch {
+    return null;
+  }
+})();
+
+/**
+ * The text of a lock's holder record when it names this host, this pid namespace and a pid that
+ * no longer exists, or null. A record that is missing, perhaps not written yet, or unreadable counts as alive, and
  * so does a process this user may not signal (EPERM).
  */
 function deadHolder(lock: string): string | null {
@@ -236,6 +254,7 @@ function deadHolder(lock: string): string | null {
     return null;
   }
   if (!isObject(holder) || holder.host !== hostname()) return null;
+  if ((holder.pidns ?? null) !== PID_NAMESPACE) return null;
   const pid = holder.pid;
   if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 0) return null;
   try {

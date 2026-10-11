@@ -249,13 +249,15 @@ test("a lock whose holder died on this host is taken over, and no other lock is"
   const attempt = () => withLock(state, () => {}, { waitMs: 0 });
   const refusal = (held: string) => (error: Error) =>
     error.message.startsWith(`${held} is held by another run`);
-  // The same lock naming this live process, pid 1, which only root may signal, or another
-  // host, or with its record missing, perhaps not written yet, or cut short, is held.
-  const holder = parse(record) as { pid: number; host: string };
+  // The same lock naming this live process, pid 1, which only root may signal, another host or
+  // another pid namespace, or with its record missing, perhaps not written yet, or cut short, is
+  // held.
+  const holder = parse(record) as { pid: number; host: string; pidns: string | null };
   const held = [
     { ...holder, pid: process.pid },
     { ...holder, pid: 1 },
     { ...holder, host: `not-${holder.host}` },
+    { ...holder, pidns: "pid:[1]" },
   ];
   for (const text of [...held.map((h) => JSON.stringify(h)), null, record.slice(0, -1)]) {
     if (text === null) rmSync(join(lock, "holder.json"));
@@ -263,9 +265,15 @@ test("a lock whose holder died on this host is taken over, and no other lock is"
     await assert.rejects(attempt(), refusal(lock));
   }
   writeFileSync(join(lock, "holder.json"), record);
-  // A takeover directory left by a run that stopped inside it is named in the refusal.
+  // A takeover directory left by a run that stopped inside it is named in the refusal, also
+  // when the lock's holder is alive.
   mkdirSync(takeover);
   await assert.rejects(attempt(), refusal(takeover));
+  writeFileSync(join(lock, "holder.json"), JSON.stringify(held[0]));
+  await assert.rejects(attempt(), (error: Error) =>
+    error.message.startsWith(`${lock} is held by another run, and ${takeover} is left`),
+  );
+  writeFileSync(join(lock, "holder.json"), record);
   rmSync(takeover, { recursive: true });
   const mine = await withLock(state, () => readFileSync(join(lock, "holder.json"), "utf8"));
   assert.equal((parse(mine) as { pid: unknown }).pid, process.pid);

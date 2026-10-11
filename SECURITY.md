@@ -229,7 +229,9 @@ each frame's logs in its receipt's top-level logs, so even one transaction's
 receipt can honestly pass 16 MiB. The node you chose, or anyone on a plain-http
 path to it, can therefore still exhaust the client's memory with a receipt
 reply, which aborts `scan`; the next `scan` or `direct-secret` on the same host
-takes over the state lock the aborted run left. A
+takes over the state lock the aborted run left. It takes over only a lock whose
+record names this host name and, on Linux, this pid namespace, so it assumes
+that no other machine sharing the state's directory has the same host name. A
 node can also alter the logs it returns instead of leaving them out, and `scan`
 cannot detect that: a changed opening ciphertext hides every payment on that
 channel, and a later scan of the same state with another node does not read
