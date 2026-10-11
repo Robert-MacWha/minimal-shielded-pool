@@ -3,8 +3,9 @@
  * other profile labels before any RPC; a pool whose deployed code, linked verifier or domain do
  * not match; a shield whose fixture cannot spend the funded note; and unknown or misplaced
  * flags. It also checks that the flags it accepts reach the sender, that the funded key is read
- * from standard input or a prompt that does not echo it, and that a key given as an argument is
- * refused without being printed. Runs in about 2 s, most of it in 49 CLI subprocesses that pin
+ * from standard input or a prompt that does not echo it, that a key given as an argument is
+ * refused without being printed, and that control characters in a node's answer are escaped
+ * before they reach the terminal. Runs in about 2 s, most of it in 53 CLI subprocesses that pin
  * the exit statuses.
  *
  *   node --test test/pool-cli.test.ts
@@ -341,6 +342,21 @@ test("the CLI redacts a key-like path from its refusal", async () => {
   assert.ok(stderr.includes("<redacted>.json is not JSON") && !stderr.includes(key), stderr);
 });
 
+// A hostile node's error text could otherwise rewrite the screen or set the clipboard (OSC 52).
+test("the CLI escapes control characters in a node's answer", async () => {
+  const hostile = "\x1b]52;c;QUFB\x07\x1b[2K\r\u009b2K";
+  const server = await rpcServer(() => ({ error: hostile }));
+  try {
+    const config = path("core/deploy_config.json");
+    const { code, stderr } = await runPoolCli([server.url, config, FIXTURE, "shield"]);
+    assert.equal(code, 1, stderr);
+    assert.ok(!/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(stderr), JSON.stringify(stderr));
+    assert.ok(stderr.includes("\\u001b]52;c;QUFB\\u0007"), stderr);
+  } finally {
+    await server.close();
+  }
+});
+
 // The pool CLI reads the funded key from standard input. In the position where it once took the
 // key it names the change (exit status 1); anywhere else the parser refuses the key (exit status
 // 2, before any file is read); a key typed where a path belongs passes the parser and the failed
@@ -592,7 +608,7 @@ describe("shield binds the fixture and reads the funded key", () => {
     config = cfg,
     extra = [],
     stdin = FUNDED + "\n",
-  }: Shield): Promise<{ error: unknown; keys: Uint8Array[] }> {
+  }: Shield): Promise<{ error: unknown; keys: Uint8Array[]; sent: Send[] }> {
     const node: PoolNode = {
       async call(method, params) {
         const request = params[0] as { to: string; data: string };
@@ -604,15 +620,20 @@ describe("shield binds the fixture and reads the funded key", () => {
     };
     const receipt = { logs: [leafLog(fixture.pool_address, ...landed)] };
     const keys: Uint8Array[] = [];
+    const sent: Send[] = [];
     const files = [writeTemp("config.json", config), writeTemp("fixture.json", fix)];
     const argv = ["http://node", ...files, "shield", ...extra];
     const deps: Parameters<typeof main>[1] = {
       node,
       checkDeployedProfile: async () => {},
-      buildAndSend: async (_node, _io, key) => (keys.push(key), receipt),
+      buildAndSend: async (_node, _io, key, _pool, send) => {
+        keys.push(key);
+        sent.push(send);
+        return receipt;
+      },
     };
     const error = await withStdin(Readable.from([Buffer.from(stdin)]), () => runMain(argv, deps));
-    return { error, keys };
+    return { error, keys, sent };
   }
 
   const otherPool = "0x" + (pool ^ 1n).toString(16).padStart(40, "0");
@@ -639,6 +660,10 @@ describe("shield binds the fixture and reads the funded key", () => {
       "fixture domain",
     ],
     ["no recorded pool", { fix: unpooled }, "record pool_address"],
+    // No one can open these inners, so the pool would lock the deposit.
+    ["inner 0", { fix: { ...fixture, inner_a: hex32(0n) } }, "which no one can spend"],
+    ["sink inner 1", { fix: { ...fixture, inner_a: hex32(1n) } }, "which no one can spend"],
+    ["sink inner 2", { fix: { ...fixture, inner_a: hex32(2n) } }, "which no one can spend"],
     ["a pool that already holds a leaf", { state: [0n, 1n, 5n] }, "next leaf is epoch 0 leaf 1"],
     ["a pool in a later epoch", { state: [1n, 0n, EMPTY_ROOT] }, "next leaf is epoch 1 leaf 0"],
     // Its recipient could not find the note.
@@ -685,11 +710,13 @@ describe("shield binds the fixture and reads the funded key", () => {
   ];
   for (const [label, options, landed] of sends) {
     test(label, async () => {
-      const { error, keys } = await shield(options);
+      const { error, keys, sent } = await shield(options);
       if (landed === null) assert.equal(error, null);
       else refused(error, [`landed at (epoch, leaf) ${landed}`, "Keep this fixture"], label);
       // The funded key comes from standard input, never the command line.
       assert.deepEqual(keys.map(toHex), ["0x" + FUNDED]);
+      // A shield keeps the default SENDER limit, since a deposit landing first can make it dearer.
+      assert.ok(sent.length === 1 && sent[0].kind === "call" && sent[0].fixedGas === true);
     });
   }
 

@@ -176,8 +176,11 @@ function openings(fx: JsonObject) {
   return notes;
 }
 
-/** The settlement fields and inserted outputs (in log order) of a pool spend. */
-export function decodeSpend(tx: ChainTransaction, pool: bigint) {
+/**
+ * The settlement fields and inserted outputs (in log order) of a pool spend. A settlement that
+ * failed is refused, or with `failed` read as one that inserted no outputs.
+ */
+export function decodeSpend(tx: ChainTransaction, pool: bigint, { failed = false } = {}) {
   if (tx.sender !== pool) throw new ReceiptError(`${tx.hash} is not a spend of this pool`);
   const frames = tx.frames.filter(
     (f) =>
@@ -188,8 +191,9 @@ export function decodeSpend(tx: ChainTransaction, pool: bigint) {
   // settle(Spend) is followed by the spend's notes, which receipts do not need.
   const settled = frames.length === 1 ? protocol.decodeSettle(frames[0].data) : null;
   if (settled === null) throw new ReceiptError(`${tx.hash} has no canonical settlement frame`);
-  if (frames[0].status !== 1n) throw new ReceiptError(`${tx.hash}'s settlement did not succeed`);
-  return { ...settled.spend, outputs: poolLeaves(frames[0].logs, pool) };
+  const succeeded = frames[0].status === 1n;
+  if (!succeeded && !failed) throw new ReceiptError(`${tx.hash}'s settlement did not succeed`);
+  return { ...settled.spend, outputs: succeeded ? poolLeaves(frames[0].logs, pool) : [] };
 }
 
 type PoolCheck = (pool: bigint) => void | Promise<void>;
@@ -263,10 +267,13 @@ async function verify(chain: Chain, receipt: unknown, poolCheck: PoolCheck) {
       }
       if (created.sender !== pool) {
         origin = `deposit in ${h}, sent by ${hexPadded(created.sender, 40)}`;
-      } else if ((await spendOf(h)).outputs.some((o) => at(o) === position)) {
+      } else if (
+        decodeSpend(created, pool, { failed: true }).outputs.some((o) => at(o) === position)
+      ) {
         origin = `output of ${h}`;
       } else {
-        // A spend's fourth frame can call a contract that shields.
+        // A spend's fourth frame can call a contract that shields, and runs even when the
+        // settlement before it failed.
         origin = `deposit made from ${h}'s fourth frame`;
       }
     }
@@ -406,9 +413,12 @@ async function prefixed<T>(prefix: string, kinds: (typeof UserError)[], body: ()
   }
 }
 
+// One spelling per hash: a node such as ethrex also takes a hash without 0x, and the report keys
+// spends by spelling, so a second spelling would list one spend twice.
 function lower(value: unknown, what: string): string {
-  if (typeof value !== "string") throw new InputError(`${what} must be a transaction hash`);
-  return value.toLowerCase();
+  const hash = typeof value === "string" ? value.toLowerCase() : "";
+  if (!hash.startsWith("0x")) throw new InputError(`${what} must be a 0x transaction hash`);
+  return hash;
 }
 
 /**

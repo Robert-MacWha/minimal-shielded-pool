@@ -240,6 +240,8 @@ export function buildWitness(
   );
   check(authorizer > 0n && authorizer < 1n << 160n, "the authorizer must be a nonzero address");
   outputs.forEach(([out, value], k) => {
+    // The circuit reduces inners mod p, so the sink checks below hold only for canonical ones.
+    check(out >= 0n && out < P, "every output inner must be in [0, p)");
     if (value === 0n) check(out === SINK_INNERS[k], "zero output must use its positional sink");
     else check(!SINK_INNERS.includes(out), "positive output uses a reserved sink inner");
   });

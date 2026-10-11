@@ -4,7 +4,8 @@
  * logged index order, other epochs' logs are ignored, and a mismatched epoch, gap or root stops
  * it. The smoke fixture's openings reproduce its nullifiers, Tree matches the incremental-tree
  * vectors, a new note's secrets are distinct field elements, an authorizer key is never zero,
- * and each zero output must use its own position's sink. Runtime: about 0.2 s.
+ * each zero output must use its own position's sink, and an output inner must be below p.
+ * Runtime: about 0.2 s.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -148,4 +149,16 @@ test("a withdrawal's zero outputs must each use their own position's sink", () =
   const withdraw = (outputs: Output[]) => buildWitness(new Tree(), inputs, outputs, 0n, terms);
   assert.deepEqual(withdraw(sinkOutputs()).out_inner, ["1", "2"]);
   assert.throws(() => withdraw(sinkOutputs().reverse()), /must use its positional sink/);
+});
+
+test("an output inner past p is refused, so an alias of a sink inner cannot slip through", () => {
+  const inputs = [{ sk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(4n))];
+  const spend = (first: Output, second: Output) =>
+    buildWitness(new Tree(), inputs, [first, second], 0n, { authorizer: 1n });
+  // The circuit reads P + 2 as sink inner 2 and refuses it for a positive output.
+  assert.throws(() => spend([3n, 3n], [P + 2n, 2n]), /must be in \[0, p\)/);
+  assert.throws(() => spend([P + 1n, 0n], [3n, 5n]), /must be in \[0, p\)/);
+  assert.throws(() => spend([-1n, 3n], [3n, 2n]), /must be in \[0, p\)/);
+  assert.throws(() => spend([P, 3n], [3n, 2n]), /must be in \[0, p\)/);
+  assert.deepEqual(spend([P - 1n, 3n], [3n, 2n]).out_inner, [String(P - 1n), "3"]);
 });

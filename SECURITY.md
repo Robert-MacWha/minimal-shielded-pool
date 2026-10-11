@@ -72,7 +72,12 @@ Poseidon libraries and the logic with a local build, and the pool with the
 committed dispatcher initcode, before it writes `core/deploy_config.json`. A
 spend's proof names a one-time authorizer whose signature covers the whole
 transaction, so a copied or rerandomized proof is useless without that
-authorizer's key.
+authorizer's key. The dispatcher takes that signature only with an empty
+`msg`, which `SIGPARAM(0, 0x02)` reports as 0, because a signature with an
+empty `msg` covers `compute_sig_hash(tx)` and with it every frame. This rests
+on EIP-8141 making an explicit 32-byte zero `msg` invalid, which reserves 0 for
+the empty case: a client that admitted one would let a signature over that
+fixed digest pass as one over the transaction.
 
 The client encrypts notes with ML-KEM-768 and ChaCha20-Poly1305 from
 `node:crypto`, which needs Node 24.7 or later built against OpenSSL 3.5 or
@@ -142,9 +147,13 @@ public, and these patterns can still link a spend to a deposit or another spend:
   nothing at the testnet's base fee.
 - Fees, gas limits and fourth frames differ between wallets and mark their
   spends.
-- A sender's first payment to a public address carries a 1,088-byte ML-KEM
-  ciphertext, which shows that someone paid a public address for the first
-  time.
+- A payment that opens a channel to a public address carries a 1,088-byte
+  ML-KEM ciphertext, which shows that someone opened one. A sender opens a
+  channel on its first payment to an address, after a restore, and when it
+  pays again before the opening payment is final.
+- The recipient sees which channel each payment arrives on, so it links every
+  payment on one channel to one sender, and to the sender's account when a
+  shield opened the channel.
 - A disclosure receipt shows its links and amounts to whoever holds it, and
   disclosing both inputs and one output of a spend reveals the other output's
   value. If that output is later withdrawn in full, the amount links the
@@ -165,20 +174,44 @@ public, and these patterns can still link a spend to a deposit or another spend:
 
 The pool does not check what a note says, so a wrong note only hides a payment
 from its recipient, and the sender can deliver the opening another way. A
+public address has no checksum: a mistyped `owner_pk` is a valid key nobody
+holds, so a payment to it is lost, and a mistyped ML-KEM key usually still
+loads and hides the payment. Copy an address whole; never retype it. A
 repeated index links two payments and reveals the XOR of their amounts, so a
 wallet must save each reservation before broadcasting
 ([README](README.md#note-delivery)). One device sends from an account at a
 time. A restored wallet, or a device taking over sending, resumes its change
-channel with `selfChannel` 10 indices past the last change note it found, so
-it is safe only while at most 10 change payments from the previous device are
-still pending; with more, wait until they are final or can no longer land.
+channel with `selfChannel`, skipping the 10 indices after the highest change
+index in finalized blocks. That is safe only while every change payment that
+is not final yet, but may still land, has a lower index than the one it
+resumes at. Until one of its change payments is final, a device that itself
+resumed with `selfChannel` sends from the very index the next takeover picks,
+so a single pending change payment from it makes a second takeover, or a
+second restore, repeat that index. Before taking over from such a device, wait
+until its change payments are final or can no longer land: a spend once its
+recent root has left the 8192-slot window, a shield once its sender's nonce is
+used.
+
+Anyone who knows a public address can make its wallet keep more state, one
+pool call at a time. A shield that opens a channel to the address makes the
+wallet watch that channel's secret for good once its note starts with one of
+the channel's first 20 tags, even if the note pays nothing, and a 1-wei
+payment at the far end of a channel's window moves that window 20 indices
+ahead. Each adds up to a few hundred bytes to the state file and 20 tags that
+every later `scan` derives again, so the state and the scan time grow with
+what the sender spends on shields. Requiring the opening note to pay something
+would not raise this price, since a 1-wei payment does.
 
 Use a seed with one pool only, since direct secrets and change indices do not
-yet depend on the deployment. After a restore, direct numbers handed out but
-not yet paid may be handed out again. A direct secret cannot spend, but anyone
-who learns it, including from a recorded channel that is broken later, sees
-which outputs paid the recipient on it and their amounts. Send it over a
-post-quantum channel and never show it in a public QR code.
+yet depend on the deployment. Only the state file that issued a direct number
+records it, so issue direct secrets from one state file. A wallet restored from
+its seed or from an older copy of its state, or a second device with a state of
+its own, may hand out again a number already handed out but not yet paid, and
+two senders with one secret link their payments and can read each other's
+amounts. A direct secret cannot spend, but anyone who learns it, including from
+a recorded channel that is broken later, sees which outputs paid the recipient
+on it and their amounts. Send it over a post-quantum channel and never show it
+in a public QR code.
 
 `notes scan` rebuilds calls that ethrex `247e2dd2` leaves out of `eth_getLogs`
 (`64b8fc09` returns them), but a full withdrawal that such a node leaves out
@@ -186,7 +219,29 @@ appends no leaf, so it leaves no gap: its note shows as unspent, and spending
 it fails. A node that also leaves a call out of its receipts makes `scan` stop,
 except for a call in an epoch's last leaf when a two-leaf settlement began the
 next epoch: the pool also closes an epoch one leaf short before such a
-settlement, so nothing shows the gap.
+settlement, so nothing shows the gap. The client refuses a node's reply over 16
+MiB before parsing it, except a reply to `eth_getBlockReceipts` or
+`eth_getTransactionReceipt`. When one `eth_getLogs` range holds more than about
+5,000 ML-KEM shields, `scan` needs a smaller `--chunk`. Receipts, which `scan`
+reads one block per call after a gap in the leaves or an epoch seen one leaf
+short, are read whole: anyone can fill a block with logs, and ethrex repeats
+each frame's logs in its receipt's top-level logs, so even one transaction's
+receipt can honestly pass 16 MiB. The node you chose, or anyone on a plain-http
+path to it, can therefore still exhaust the client's memory with a receipt
+reply, which aborts `scan`; the next `scan` or `direct-secret` on the same host
+takes over the state lock the aborted run left. It takes over only a lock whose
+record names this host name and, on Linux, this pid namespace, so it assumes
+that no other machine sharing the state's directory has the same host name. A
+node can also alter the logs it returns instead of leaving them out, and `scan`
+cannot detect that: a changed opening ciphertext hides every payment on that
+channel, and a later scan of the same state with another node does not read
+those blocks again. A node that reports a finalized block the chain has not
+reached makes the state skip every block the chain finalizes up to that one, and
+until the chain gets there, `scan` refuses an honest node as lagging. Scan with
+a node you trust; to check one, or when `scan` keeps calling a node lagging,
+scan into a new state file with another node. The new file does not record the
+direct numbers the old one handed out, so issue direct secrets from it only once
+each of those numbers has been paid.
 Earlier versions of `scan` read no receipts when a new epoch began, so a state
 file they saved can lack a payment in an epoch's last leaves. When such a file
 shows an epoch that closed short of full, the next `scan` rescans from the
@@ -224,9 +279,9 @@ archive, which nobody guarantees to keep.
 
 What the tests check is in the header of each TypeScript test file,
 [docs/design.md](docs/design.md#the-client-and-its-cross-checks) and
-[test/native/README.md](test/native/README.md). The September 2026 testnet
-runs are in the [README](README.md#deployment), and earlier dated runs are
-under the [`evidence-archive`](https://github.com/soispoke/minimal-shielded-pool/tree/evidence-archive/evidence) tag. The tests and runs show compatibility
+[test/native/README.md](test/native/README.md). The September and October 2026
+testnet runs are in the [README](README.md#deployment), and earlier dated runs
+are under the [`evidence-archive`](https://github.com/soispoke/minimal-shielded-pool/tree/evidence-archive/evidence) tag. The tests and runs show compatibility
 with one testnet configuration, not production readiness.
 
 ## Reporting

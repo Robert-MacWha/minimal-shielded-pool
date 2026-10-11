@@ -37,7 +37,7 @@ import {
 } from "./notes.ts";
 import * as protocol from "./protocol.ts";
 import { LEAF_APPENDED, NOTES, NOTE_SPENT, TREE_CAPACITY } from "./protocol.ts";
-import type { RpcChain } from "./rpc.ts";
+import { ChainError, TOO_LARGE, type RpcChain } from "./rpc.ts";
 
 const STATE_VERSION = 3;
 const POOL_TOPICS: readonly string[] = [LEAF_APPENDED, NOTE_SPENT, NOTES];
@@ -129,6 +129,9 @@ export class Scanner {
     this.chainId = chainId;
     this.pool = pool;
     this.#gap = BigInt(options.gap ?? GAP);
+    // Every pool starts at epoch 0, so a node that serves nothing of it stops the scan instead
+    // of letting it begin at a later epoch and miss that epoch's notes.
+    this.#tree.set(0n, 0n);
     this.#add(keys.selfSecret, "self");
     for (let n = 0n; n < this.#gap; n++) this.#add(keys.directSecret(n), "direct", 0n, n);
   }
@@ -140,9 +143,10 @@ export class Scanner {
   }
 
   // From index 0: a payment with an earlier index can land after a later one, including after
-  // the state was saved and loaded again.
-  #watch(incoming: Incoming): void {
-    for (let index = 0n; index < incoming.nextIndex + BigInt(LOOKAHEAD); index++) {
+  // the state was saved and loaded again. Tags stay watched, so a window that moves on derives
+  // only the indices it newly covers.
+  #watch(incoming: Incoming, from = 0n): void {
+    for (let index = from; index < incoming.nextIndex + BigInt(LOOKAHEAD); index++) {
       this.#tags.set(tagOf(noteTag(incoming.secret, index)), [incoming, index]);
     }
   }
@@ -206,10 +210,13 @@ export class Scanner {
       const secret = this.keys.decapsulate(body.subarray(0, KEM_CIPHERTEXT_BYTES));
       body = body.subarray(KEM_CIPHERTEXT_BYTES);
       // A foreign ciphertext decapsulates to a pseudorandom key, so a secret is adopted only if
-      // a note carries a tag at an index a fresh channel would watch.
+      // a note carries a tag at an index a fresh channel would watch. A watched secret's first
+      // tag is always in #tags, so one lookup tells whether the secret is already watched.
       const window = new Set<string>();
       for (let i = 0n; i < BigInt(LOOKAHEAD); i++) window.add(tagOf(noteTag(secret, i)));
-      const known = this.incoming.some((i) => crypto.timingSafeEqual(i.secret, secret));
+      const [first] = window;
+      const watched = this.#tags.get(first!);
+      const known = watched !== undefined && crypto.timingSafeEqual(watched[0].secret, secret);
       if (!known && notesOf(body).some((note) => window.has(tagOf(note)))) this.#add(secret, "kem");
     } else if (![0, NOTE_BYTES, 2 * NOTE_BYTES].includes(body.length)) {
       throw new NotesError(`an event published ${body.length} note bytes`);
@@ -238,8 +245,9 @@ export class Scanner {
     const { kind } = incoming;
     const record = this.#record({ cm, epoch, index, value, rho, nullifier, spent: false, kind });
     if (noteIndex + 1n > incoming.nextIndex) {
+      const watched = incoming.nextIndex + BigInt(LOOKAHEAD);
       incoming.nextIndex = noteIndex + 1n;
-      this.#watch(incoming);
+      this.#watch(incoming, watched);
     }
     if (kind === "direct" && incoming.number > this.directHighest) {
       for (let n = this.directHighest + this.#gap + 1n; n <= incoming.number + this.#gap; n++) {
@@ -326,11 +334,18 @@ export class Scanner {
     // The file lists every watched secret, the self and direct ones included.
     scanner.incoming.length = 0;
     scanner.#tags.clear();
+    // Each note found raises its secret's next_index by at most LOOKAHEAD, and every note found
+    // is kept, so the indices sum to at most LOOKAHEAD per note. A larger sum is a corrupt file,
+    // whose tags would take without end to derive.
+    const notes = asList(state.notes, "notes");
+    let indices = BigInt(LOOKAHEAD) * BigInt(notes.length);
     for (const item of asList(state.incoming, "incoming")) {
       const i = asObject(item, "an incoming secret");
       // 32 bytes, as scan() compares secrets with timingSafeEqual, which throws on other lengths.
       const secret = fromHex(i.secret, "an incoming secret", SECRET_BYTES);
       const nextIndex = parseDec(i.next_index, "an incoming next_index");
+      indices -= nextIndex;
+      if (indices < 0n) throw new NotesError("the state file's next_index values exceed its notes");
       scanner.#add(secret, kindOf(i.kind), nextIndex, jsonInteger(i.number, "number"));
     }
     scanner.directHighest = jsonInteger(state.direct_highest, "direct_highest");
@@ -339,7 +354,7 @@ export class Scanner {
     for (const [epoch, next] of Object.entries(asObject(state.tree, "tree"))) {
       scanner.#tree.set(parseDec(epoch, "a tree epoch"), parseDec(next, "a tree size"));
     }
-    for (const item of asList(state.notes, "notes")) {
+    for (const item of notes) {
       const r = asObject(item, "a note");
       const field = (key: string) => toBigint(fromHex(r[key], `a note's ${key}`, 32));
       const uint = (key: string) => parseDec(r[key], `a note's ${key}`);
@@ -462,29 +477,37 @@ export function eventsFromLogs(logs: readonly unknown[]): PoolEvent[] {
 
 type Rpc = Pick<RpcChain, "call">;
 
-/** The pool's LeafAppended, NoteSpent and Notes logs in [from, to]. */
-async function fetchLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint, chunk = 2000) {
+/**
+ * The pool's LeafAppended, NoteSpent and Notes logs in [from, to], one eth_getLogs reply at a
+ * time, so that no more than one reply is held at once.
+ */
+async function* fetchLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint, chunk = 2000) {
   if (!(Number.isSafeInteger(chunk) && chunk >= 1)) {
     throw new NotesError("a chunk is at least one block");
   }
-  const logs: unknown[] = [];
   for (let start = from, step = BigInt(chunk); start <= to; start += step) {
     const end = start + step - 1n < to ? start + step - 1n : to;
     const range = { fromBlock: hexPadded(start, 1), toBlock: hexPadded(end, 1) };
     const filter = { address: hexPadded(pool, 40), topics: [POOL_TOPICS], ...range };
-    logs.push(...asList(await chain.call("eth_getLogs", [filter]), "eth_getLogs's result"));
+    const found = await chain.call("eth_getLogs", [filter]).catch((error: unknown) => {
+      // An honest chunk passes rpc()'s cap once it holds about 5,000 ML-KEM shields.
+      if (error instanceof ChainError && error.message.endsWith(TOO_LARGE)) {
+        throw new ChainError(`${error.message}; pass a smaller --chunk`, { cause: error });
+      }
+      throw error;
+    });
+    yield asList(found, "eth_getLogs's result");
   }
-  return logs;
 }
 
 /**
- * The same logs, read from block receipts. ethrex 247e2dd2 leaves out of eth_getLogs every log
- * of a frame transaction in which any frame failed, although the frames that succeeded,
- * settlement included, keep their effects.
+ * The same logs, read from block receipts one block at a time. ethrex 247e2dd2 leaves out of
+ * eth_getLogs every log of a frame transaction in which any frame failed, although the frames
+ * that succeeded, settlement included, keep their effects.
  */
-async function receiptLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint) {
-  const logs: unknown[] = [];
+async function* receiptLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint) {
   for (let block = from; block <= to; block++) {
+    const logs: unknown[] = [];
     const receipts = await chain.call("eth_getBlockReceipts", [hexPadded(block, 1)]);
     for (const value of asList(receipts ?? [], "eth_getBlockReceipts's result")) {
       const receipt = asObject(value, "a receipt");
@@ -514,8 +537,8 @@ async function receiptLogs(chain: Rpc, pool: bigint, from: bigint, to: bigint) {
         }),
       );
     }
+    yield logs;
   }
-  return logs;
 }
 
 /**
@@ -536,23 +559,40 @@ export async function scanToFinalized(
   }
   const start = maxBigint(scanner.scannedBlock + 1n, deployment);
   const head = await chain.finalizedBlock();
-  const logs = await fetchLogs(chain, scanner.pool, start, head, chunk);
+  // A state saved at a head the chain has not reached would skip every payment up to it, so a
+  // finalized head behind the last scan is refused rather than read as nothing new.
+  if (head < scanner.scannedBlock) {
+    throw new NotesError(
+      `the RPC's finalized block ${head} is behind block ${scanner.scannedBlock}, where this ` +
+        "state's last scan stopped: the RPC lags, or a node used before reported a block the " +
+        "chain had not reached, in which case this state skips every block the chain finalizes " +
+        "up to that one. Unless the lag ends soon, scan into a new state file with a node you " +
+        "trust",
+    );
+  }
   const at = (e: PoolEvent) => [e.block, e.tx, BigInt(e.call)];
-  for (const event of eventsFromLogs(logs)) {
-    if (scanner.skipsLeaves(event)) {
-      // The missing calls came after the last leaf seen (possibly in its block) and before
-      // this event. Apply each one not applied yet, whether or not this node's eth_getLogs
-      // shows it, since an earlier scan may have used a node that left it out. A call without
-      // leaves changes nothing when applied twice.
-      const from = maxBigint(scanner.leafBlock, deployment);
-      const missed = eventsFromLogs(await receiptLogs(chain, scanner.pool, from, event.block));
-      for (const call of missed) {
-        if (compareKeys(at(call), at(event)) < 0 && !scanner.applied(call)) {
-          scanner.scan(call, false);
+  // Each reply's events are applied before the next reply is read, here and in the receipts
+  // fallback, so a scan holds one reply at a time: a node that sends many eth_getLogs replies
+  // under rpc()'s cap must not be able to fill the heap, which aborts the process. rpc() reads a
+  // receipts reply whole, so the node can still do that with one.
+  for await (const logs of fetchLogs(chain, scanner.pool, start, head, chunk)) {
+    for (const event of eventsFromLogs(logs)) {
+      if (scanner.skipsLeaves(event)) {
+        // The missing calls came after the last leaf seen (possibly in its block) and before
+        // this event. Apply each one not applied yet, whether or not this node's eth_getLogs
+        // shows it, since an earlier scan may have used a node that left it out. A call
+        // without leaves changes nothing when applied twice.
+        const from = maxBigint(scanner.leafBlock, deployment);
+        for await (const logs of receiptLogs(chain, scanner.pool, from, event.block)) {
+          for (const call of eventsFromLogs(logs)) {
+            if (compareKeys(at(call), at(event)) < 0 && !scanner.applied(call)) {
+              scanner.scan(call, false);
+            }
+          }
         }
       }
+      scanner.scan(event);
     }
-    scanner.scan(event);
   }
   scanner.scannedBlock = maxBigint(scanner.scannedBlock, head);
 }

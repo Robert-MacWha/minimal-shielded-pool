@@ -301,8 +301,12 @@ interface SendCase {
   fees?: { maxFee?: bigint; maxPriorityFee?: bigint };
   /** A call moving 5 wei to the pool from key 1's account, in place of the spend. */
   call?: boolean;
+  /** The call keeps the default SENDER limit, as a shield does. */
+  fixedGas?: boolean;
   balance?: string;
   dryRun?: boolean;
+  /** Collects the progress lines. */
+  lines?: string[];
 }
 /** A withdrawal with its default claim. */
 const CLAIM: SendCase = { action: null, settle: settlement(5n, ACCOUNT) };
@@ -341,7 +345,7 @@ async function sendCase(options: SendCase): Promise<{ error: unknown; sent: Uint
     simulate: async () => simulations.shift(),
   };
   const send = o.call
-    ? ({ kind: "call", value: 5n, calldata: CALLDATA } as const)
+    ? ({ kind: "call", value: 5n, calldata: CALLDATA, fixedGas: o.fixedGas } as const)
     : ({
         kind: "spend",
         settle: o.settle,
@@ -350,7 +354,7 @@ async function sendCase(options: SendCase): Promise<{ error: unknown; sent: Uint
         action: o.action,
         allowFailedClaim: o.allowFailedClaim,
       } as const);
-  const io = { log: () => {}, sleep: async () => {} };
+  const io = { log: (line: string) => void o.lines?.push(line), sleep: async () => {} };
   const sendOptions = { ...o.fees, dryRun: o.dryRun };
   const error = await buildAndSend(node, io, toBytes(1n, 32), POOL, send, sendOptions).then(
     () => null,
@@ -546,6 +550,16 @@ describe("the spend verdict", () => {
   }
 });
 
+test("a node's control characters in a progress line are escaped", async () => {
+  const lines: string[] = [];
+  const hostile = "\x1b]52;c;QUFB\x07\u009b2K";
+  const { error } = await sendCase({ ...simulated("++++", true, hostile), dryRun: true, lines });
+  assert.equal(error, null);
+  const text = lines.join("\n");
+  assert.ok(text.includes("\\u001b]52;c;QUFB\\u0007\\u009b2K"), text);
+  assert.ok(!/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(text), JSON.stringify(text));
+});
+
 describe("calls", () => {
   // A shield or publish loses nothing when it reverts, so it may go without a simulation.
   const CALL: SendCase = { call: true, ...mined("0x1") };
@@ -566,11 +580,12 @@ describe("calls", () => {
     assert.deepEqual(fields.slice(1, 3), [rlpList([rlpInt(0n)]), rlpInt(1n)]);
   });
 
-  test("a call's SENDER limit is measured gas plus 25%, or the default if that fails", async () => {
+  test("a call's SENDER limit is measured gas plus 25%, or the default for a shield or if that fails", async () => {
     const sized: [SendCase, bigint][] = [
       [{}, 1_310_720n], // 0x100000 plus 25%
       [{ resized: simulated("+-").simulation }, gas.SETTLE_FRAME_GAS],
       [{ simulation: null }, gas.SETTLE_FRAME_GAS],
+      [{ fixedGas: true }, gas.SETTLE_FRAME_GAS],
     ];
     for (const [change, senderGas] of sized) {
       const { error, sent } = await sendCase({ ...CALL, ...change });

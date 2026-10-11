@@ -8,7 +8,7 @@
  * out-of-field words and signals that snarkjs alone would accept. The consumed-key registry and
  * the authentication of epoch roots are left to the native tests.
  *
- * Runtime: about 14 s, of which the five circom2 compiles, run in parallel, take about 4 s.
+ * Runtime: about 17 s, including six circom2 compiles run in parallel.
  * Everything is built in a fresh temporary directory, so a changed circuit is never checked
  * against stale variants, and the file can run alongside other tests.
  */
@@ -101,12 +101,30 @@ const UNCHECKED = [
   "        outEqSink1[k].out * (1 - outIsZero[k].out) === 0;\n",
   "    sameNullifier.out === 0;\n",
   "    sameOutput.out === 0;\n",
+  "    noRealInput.out === 0;\n",
+  "    authorizerIsZero.out === 0;\n",
+  "    publicIsZero.out === recipientIsZero.out;\n",
 ];
 const RANGE = "        rc[k].in <== vals[k];\n";
+// The wide variant decomposes every amount and both addresses into 254 bits. Below each check's
+// width the low bits are the committed ones, so an honest witness still holds, while a value at
+// or above the width leaves the committed bits short of it. Unlike range-k, it also covers
+// ranges whose value in the template witness is not zero.
+const WIDE = [
+  ["        rc[k] = Num2Bits(128);\n", "        rc[k] = Num2Bits(254);\n"],
+  [
+    "    component recipientBits = Num2Bits(160);\n",
+    "    component recipientBits = Num2Bits(254);\n",
+  ],
+  [
+    "    component authorizerBits = Num2Bits(160);\n",
+    "    component authorizerBits = Num2Bits(254);\n",
+  ],
+];
 
 // range-k drops the 128-bit range check of vals[k], where vals is [in_value[0], in_value[1],
 // out_value[0], out_value[1], public_amount, fee].
-const VARIANTS = ["unchecked", "range-2", "range-3", "range-5"] as const;
+const VARIANTS = ["unchecked", "range-2", "range-3", "range-5", "wide"] as const;
 type Variant = (typeof VARIANTS)[number];
 
 /** The variant's source; every line it edits must occur exactly once in the circuit. */
@@ -115,7 +133,9 @@ function variantSource(variant: Variant): string {
   const edits =
     variant === "unchecked"
       ? UNCHECKED.map((line) => [line, ""])
-      : [[RANGE, `        if (k == ${k}) { rc[k].in <== 0; } else { rc[k].in <== vals[k]; }\n`]];
+      : variant === "wide"
+        ? WIDE
+        : [[RANGE, `        if (k == ${k}) { rc[k].in <== 0; } else { rc[k].in <== vals[k]; }\n`]];
   let source = readFileSync(CIRCUIT, "utf8");
   for (const [line, replacement] of edits) {
     assert.equal(source.split(line).length, 2, line);
@@ -313,6 +333,28 @@ const [negative, inflated] = [String(pr.P - 10n ** 21n), String(100n + 10n ** 21
 const wideTree = treeOf(wideInputs.map((i) => pr.commitment(i.sk, i.rho, i.value)));
 const wideTerms = { authorizer, publicAmount: 1n, recipient };
 const wide = buildWitness(wideTree, wideInputs, wideOutputs, domain0, wideTerms);
+// A one-leaf tree whose note holds exactly 2^128, which no wallet can make: buildWitness takes
+// the note at 2^128 - 1 and the case below raises it, so the root still proves its membership.
+const [bigSk, bigRho] = newNote(rng);
+const bigTree = treeOf([pr.commitment(bigSk, bigRho, 1n << 128n)]);
+const bigNote: pr.SpendInput = { sk: bigSk, rho: bigRho, value: max, idx: 0n };
+const bigOutputs: pr.Output[] = [pr.sinkOutputs()[0], [pr.inner(...newNote(rng)), max - 1n]];
+const bigTerms = { authorizer, fee: 1n };
+/** An input of exactly 2^128 in position k, paying 2^128 - 1 and a fee of 1. */
+const bigInput = (k: number) =>
+  edited(
+    buildWitness(
+      bigTree,
+      k === 0 ? [bigNote, dummy] : [dummy, bigNote],
+      bigOutputs,
+      domain0,
+      bigTerms,
+    ),
+    (w) => {
+      w.in_value[k] = String(1n << 128n);
+      w.out_value[1] = String(max);
+    },
+  );
 
 /** first-occurrence's witness from the committed WASM, the template variants are placed on. */
 const template = once(() => calculate("template", first));
@@ -448,6 +490,38 @@ const REJECTED: Rejected[] = [
       w.out_value[1] = String(1n << 128n);
     }),
     "range-3",
+  ],
+  // The rules below had no case: the smoke generator checks three of them only against the
+  // WASM's runtime asserts.
+  [
+    "no-real-input",
+    edited(first, (w) =>
+      Object.assign(w, { in_value: ["0", "0"], public_amount: "0", recipient: "0" }),
+    ),
+  ],
+  ["zero-authorizer", edited(first, (w) => (w.authorizer = "0"))],
+  ["withdrawal-without-recipient", edited(first, (w) => (w.recipient = "0"))],
+  ["recipient-without-withdrawal", edited(transfer, (w) => (w.recipient = String(recipient)))],
+  [
+    "recipient-of-2^160-or-more",
+    edited(first, (w) => (w.recipient = String(recipient + (1n << 160n)))),
+    "wide",
+  ],
+  [
+    "authorizer-of-2^160-or-more",
+    edited(first, (w) => (w.authorizer = String(authorizer + (1n << 160n)))),
+    "wide",
+  ],
+  ...[0, 1].map((k): Rejected => [`input-${k}-of-exactly-2^128`, bigInput(k), "wide"]),
+  // The inputs pay a withdrawal of exactly 2^128 through both sinks.
+  [
+    "public-amount-of-exactly-2^128",
+    edited(wide, (w) => {
+      w.out_inner[1] = String(pr.sinkOutputs()[1][0]);
+      w.out_value[1] = "0";
+      w.public_amount = String(1n << 128n);
+    }),
+    "wide",
   ],
 ];
 for (const [name, witness, variant = "unchecked"] of REJECTED) {

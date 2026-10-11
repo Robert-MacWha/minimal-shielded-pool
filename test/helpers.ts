@@ -57,9 +57,16 @@ export type RpcCall = { id: unknown; method: string; params: any; path: string }
 
 /**
  * The reply to one call: its JSON-RPC `result` or `error`, sent with HTTP status 200 unless
- * `status` names another; or, with `redirect`, a 307 to that location and no body.
+ * `status` names another; or, with `redirect`, a 307 to that location and no body. With `part`,
+ * the reply's text is written that many characters at a time, each part its own HTTP chunk.
  */
-export type RpcReply = { result?: unknown; error?: unknown; status?: number; redirect?: string };
+export type RpcReply = {
+  result?: unknown;
+  error?: unknown;
+  status?: number;
+  redirect?: string;
+  part?: number;
+};
 
 /**
  * A JSON-RPC node on 127.0.0.1, at a port the system picks, that answers each call from `answer`
@@ -75,10 +82,13 @@ export async function rpcServer(answer: (call: RpcCall) => RpcReply | Promise<Rp
     const { id, method, params } = JSON.parse(body);
     const call = { id, method, params, path: request.url ?? "/" };
     requests.push(call);
-    const { status = 200, redirect, ...reply } = await answer(call);
+    const { status = 200, redirect, part, ...reply } = await answer(call);
     if (redirect !== undefined) return void response.writeHead(307, { location: redirect }).end();
     const text = JSON.stringify({ jsonrpc: "2.0", id, ...reply });
-    response.writeHead(status, { "content-type": "application/json" }).end(text);
+    response.writeHead(status, { "content-type": "application/json" });
+    if (part === undefined) return void response.end(text);
+    for (let at = 0; at < text.length; at += part) response.write(text.slice(at, at + part));
+    response.end();
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
   const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

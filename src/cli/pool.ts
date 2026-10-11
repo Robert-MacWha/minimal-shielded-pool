@@ -48,7 +48,10 @@ const SPEC = {
     "--dry-run": { kind: "flag", help: "simulate without submitting" },
     "--epoch": { kind: "int", help: "epoch to publish" },
     "--note": { kind: "int", help: "index into the fixture's shields" },
-    "--spend-key": { kind: "string", help: "fixture key of the spend entry (e.g. transfer_c)" },
+    "--spend-key": {
+      kind: "string",
+      help: "name of the fixture's spend entry (e.g. transfer_c), never a key",
+    },
     "--root-slot": { kind: "int", help: "consensus slot that published the root" },
     "--no-tail": { kind: "flag", help: "send a spend without a fourth frame" },
     "--allow-failed-claim": {
@@ -220,8 +223,8 @@ export async function main(argv: readonly string[], deps: Deps = {}): Promise<vo
   const node = deps.node ?? poolNode(positionals.rpc);
   const sendTx = deps.buildAndSend ?? buildAndSend;
   const io: SendIo = { log: (line) => process.stdout.write(line + "\n") };
-  const sendCall = async (value: bigint, calldata: Uint8Array) => {
-    const call = { kind: "call", value, calldata } as const;
+  const sendCall = async (value: bigint, calldata: Uint8Array, fixedGas = false) => {
+    const call = { kind: "call", value, calldata, fixedGas } as const;
     const key = await (deps.readFundedKey ?? fundedKey)();
     return sendTx(node, io, key, poolAddress, call, { dryRun });
   };
@@ -247,7 +250,7 @@ export async function main(argv: readonly string[], deps: Deps = {}): Promise<vo
     await checkShieldFixture(node, poolAddress, chainId, fix, leaf, priorRoot);
     const calldata = shieldCalldata(inner, entry);
     io.log(`shield ${value} wei via frame tx -> pool ${cfg.pool}`);
-    const receipt = await sendCall(value, calldata);
+    const receipt = await sendCall(value, calldata, true);
     if (receipt === null) return;
     const landed = shieldLeaf(receipt, poolAddress);
     const shown = landed === null ? "none" : `(${landed.join(", ")})`;

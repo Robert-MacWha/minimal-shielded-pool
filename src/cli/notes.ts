@@ -13,6 +13,8 @@
  * issued again. Without --seed-file the seed is typed at a hidden prompt or read from standard
  * input, never taken from the command line, which other local users can read.
  */
+import { existsSync, realpathSync } from "node:fs";
+
 import { hex32, parseConfigAddress, parseDec, toHex } from "../bytes.ts";
 import { NotesError } from "../errors.ts";
 import {
@@ -52,7 +54,11 @@ export async function main(argv: readonly string[]): Promise<void> {
   // The seed is read and checked first, so a bad seed is reported before any other option.
   const file = options["--seed-file"];
   const seed = file ? readPrivate(file) : await readSecretLine("wallet seed (hex): ");
-  const keys = new WalletKeys(pastedHex(seed.trim(), "a seed"), options["--account"] ?? 0n);
+  const seedBytes = pastedHex(seed.trim(), "a seed");
+  // WalletKeys hashes the account as one 32-byte word and throws a RangeError past it.
+  const account = options["--account"] ?? 0n;
+  if (account >= 1n << 256n) throw new NotesError("--account must be below 2^256");
+  const keys = new WalletKeys(seedBytes, account);
   const chunk = options["--chunk"];
   const command = {
     keys,
@@ -149,10 +155,14 @@ export async function directSecretCommand(options: CommandOptions): Promise<stri
  */
 async function withState(
   command: string,
-  { keys, config: configPath, state: statePath }: CommandOptions,
+  { keys, config: configPath, state }: CommandOptions,
   body: (config: JsonObject, scanner: Scanner, save: () => void) => Promise<string>,
 ): Promise<string> {
-  if (!configPath || !statePath) throw new NotesError(`${command} needs --config and --state`);
+  if (!configPath || !state) throw new NotesError(`${command} needs --config and --state`);
+  // A save renames a new file over the path, and the lock is named after it, so a state named
+  // through a symbolic link is resolved first. Otherwise the save would replace the link with a
+  // file, and the file it named, now stale, could hand out the same direct numbers again.
+  const statePath = existsSync(state) ? realpathSync(state) : state;
   return withLock(statePath, () => {
     const config = asObject(readJson(configPath), configPath);
     if (config.profile !== POOL_PROFILE) {

@@ -3,15 +3,16 @@
  * public seed off the test chain, a recipient that strands its credit, and overwriting a fixture
  * that may hold the only secrets of unspent notes. A refusal never echoes a key pasted as an
  * argument. Secrets are owner-only, --random draws fresh wallets, live fixtures default to the
- * ignored artifacts/, a state lock admits one run at a time, and a real nonce-race run records
- * what recovery and the shield check need.
+ * ignored artifacts/, a state lock admits one run at a time and passes to a single run once its
+ * holder dies, and a real nonce-race run records what recovery and the shield check need.
  *
  * Run: node --test test/generators.test.ts (about 2 s, most of it the run that proves two
  * transfers).
  */
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
-import {
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import fs, {
   chmodSync,
   closeSync,
   existsSync,
@@ -20,6 +21,7 @@ import {
   openSync,
   readFileSync,
   readdirSync,
+  readlinkSync,
   realpathSync,
   rmSync,
   statSync,
@@ -27,8 +29,10 @@ import {
   utimesSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
+import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { after, suite, test } from "node:test";
 
@@ -176,6 +180,32 @@ test("secret files are owner-only and never replace another run's fixture", () =
   assert.deepEqual(left, [], "temporary file left behind");
 });
 
+test("a save syncs its directory, so a crash cannot bring back the earlier file", () => {
+  // A rename is atomic but durable only once its directory is synced. Only a crash shows the
+  // difference, so the syncs are counted.
+  const dir = realpathSync(mkdtempSync(join(TMP, "durable-")));
+  const { openSync: open, fsyncSync: fsync } = fs;
+  const opened = new Map<number, string>();
+  const synced: string[] = [];
+  fs.openSync = (...args: Parameters<typeof open>) => {
+    const fd = open(...args);
+    opened.set(fd, String(args[0]));
+    return fd;
+  };
+  fs.fsyncSync = (fd: number) => (synced.push(opened.get(fd) ?? ""), fsync(fd));
+  syncBuiltinESMExports();
+  try {
+    const state = join(dir, "state.json");
+    writePrivate(state, "{}", null);
+    writePrivate(state, "{}", fileIdentity(state));
+    writePrivate(state, "{}");
+  } finally {
+    Object.assign(fs, { openSync: open, fsyncSync: fsync });
+    syncBuiltinESMExports();
+  }
+  assert.equal(synced.filter((path) => path === dir).length, 3);
+});
+
 test("an --output path follows links as the kernel does", () => {
   const dir = realpathSync(mkdtempSync(join(TMP, "links-")));
   mkdirSync(join(dir, "a", "b"), { recursive: true });
@@ -194,6 +224,120 @@ test("a state lock admits one run at a time and is released when its process exi
     await withLock(${JSON.stringify(state)}, () => process.exit(3));`;
   assert.equal(spawnSync(process.execPath, ["--input-type=module", "-e", exits]).status, 3);
   assert.equal(existsSync(`${state}.lock.d`), false);
+});
+
+const FILES = JSON.stringify(new URL("../src/files.ts", import.meta.url).href);
+
+/**
+ * The holder record left in the lock of `state` by a run that dies inside it. SIGKILL skips the
+ * exit handler that removes the lock, as V8 does when it aborts on an exhausted heap.
+ */
+function diedHolding(state: string): string {
+  const dies = `import { withLock } from ${FILES};
+    await withLock(${JSON.stringify(state)}, () => process.kill(process.pid, "SIGKILL"));`;
+  const run = spawnSync(process.execPath, ["--input-type=module", "-e", dies]);
+  assert.equal(run.signal, "SIGKILL");
+  const record = readFileSync(join(`${state}.lock.d`, "holder.json"), "utf8");
+  assert.equal((parse(record) as { pid: unknown }).pid, run.pid);
+  return record;
+}
+
+test("a lock whose holder died on this host is taken over, and no other lock is", async () => {
+  const state = join(TMP, "died.json");
+  const lock = `${state}.lock.d`;
+  const takeover = `${lock}.takeover`;
+  const record = diedHolding(state);
+  const attempt = () => withLock(state, () => {}, { waitMs: 0 });
+  // A refusal says what holds the lock and what to remove.
+  const refusal = (held: string, remove = "it") => ({
+    message: `${held}; if no other run is active, remove ${remove} and try again`,
+  });
+  // The same lock naming this live process, pid 1, which only root may signal, another host or
+  // another pid namespace, or with its record missing, perhaps not written yet, or cut short, is
+  // held. So is a record whose pid is not a positive safe integer, such as minus the dead pid,
+  // which process.kill would read as a process group that does not exist.
+  const holder = parse(record) as { pid: number; host: string; pidns: string | null };
+  // On Linux the record names the holder's pid namespace, here the test's own; elsewhere none.
+  const namespace = existsSync("/proc/self/ns/pid") ? readlinkSync("/proc/self/ns/pid") : null;
+  assert.equal(holder.pidns, namespace);
+  const held = [
+    { ...holder, pid: process.pid },
+    { ...holder, pid: 1 },
+    { ...holder, host: `not-${holder.host}` },
+    { ...holder, pidns: "pid:[1]" },
+    ...[0, -1, -holder.pid, 1.5, "123", null, 2 ** 53 + 2].map((pid) => ({ ...holder, pid })),
+  ];
+  for (const text of [...held.map((h) => JSON.stringify(h)), null, record.slice(0, -1)]) {
+    if (text === null) rmSync(join(lock, "holder.json"));
+    else writeFileSync(join(lock, "holder.json"), text);
+    await assert.rejects(attempt(), refusal(`${lock} is held by another run`));
+  }
+  writeFileSync(join(lock, "holder.json"), record);
+  // A takeover directory left by a run that stopped inside it is named in the refusal, also
+  // when the lock's holder is alive.
+  mkdirSync(takeover);
+  const busy = `${takeover} is held by another run taking over ${lock}`;
+  await assert.rejects(attempt(), refusal(busy));
+  writeFileSync(join(lock, "holder.json"), JSON.stringify(held[0]));
+  const left = `${lock} is held by another run, and ${takeover} is left from a takeover`;
+  await assert.rejects(attempt(), refusal(left, "both"));
+  writeFileSync(join(lock, "holder.json"), record);
+  rmSync(takeover, { recursive: true });
+  const mine = await withLock(state, () => readFileSync(join(lock, "holder.json"), "utf8"));
+  assert.equal((parse(mine) as { pid: unknown }).pid, process.pid);
+  assert.equal(existsSync(lock), false);
+  assert.equal(existsSync(takeover), false);
+});
+
+test("of eight runs that find one dead lock at once, exactly one takes it", async () => {
+  // Eight processes run 500 rounds. Each round they find the same dead lock and try to take it
+  // at the same moment, without waiting. Whichever takes it holds it until all have answered, so
+  // a second taker would show as a second holder.
+  const state = join(TMP, "race.json");
+  const lock = `${state}.lock.d`;
+  const record = diedHolding(state);
+  const taker = `import { withLock } from ${FILES};
+    import { createInterface } from "node:readline";
+    const lines = createInterface({ input: process.stdin })[Symbol.asyncIterator]();
+    const hold = async () => { console.log("held"); await lines.next(); };
+    const refused = async (error) => { console.log(error.message); await lines.next(); };
+    while (!(await lines.next()).done) {
+      await withLock(${JSON.stringify(state)}, hold, { waitMs: 0 }).catch(refused);
+      console.log("next");
+    }`;
+  const takers = Array.from({ length: 8 }, () =>
+    spawn(process.execPath, ["--input-type=module", "-e", taker]),
+  );
+  const exits = takers.map((child) => once(child, "exit"));
+  const outputs = takers.map((child) =>
+    createInterface({ input: child.stdout! })[Symbol.asyncIterator](),
+  );
+  const tell = (line: string) => takers.forEach((child) => child.stdin!.write(`${line}\n`));
+  const answers = () =>
+    Promise.all(outputs.map(async (output) => (await output.next()).value ?? "exited"));
+  try {
+    for (let round = 0; round < 500; round++) {
+      if (round > 0) {
+        mkdirSync(lock);
+        writeFileSync(join(lock, "holder.json"), record);
+      }
+      tell("go");
+      const answered = await answers();
+      tell("done");
+      assert.deepEqual(await answers(), Array(8).fill("next"));
+      const refused = answered.filter((answer) => answer !== "held");
+      assert.equal(refused.length, 7, answered.join(" | "));
+      assert.ok(
+        refused.every((answer) => /held by another run/.test(answer)),
+        refused.join(" | "),
+      );
+      assert.equal(existsSync(lock), false);
+      assert.equal(existsSync(`${lock}.takeover`), false);
+    }
+  } finally {
+    takers.forEach((child) => child.stdin!.end());
+    await Promise.all(exits);
+  }
 });
 
 test("live fixtures default to the ignored artifacts directory", () => {

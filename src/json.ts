@@ -131,6 +131,21 @@ const SHORT_ESCAPES: Record<string, string> = {
   "\f": "\\f",
 };
 
+/**
+ * The text with DEL and every C0 and C1 control character except newline and tab written as
+ * \uXXXX. runCli passes each refusal or error it reports with status 1 through this, and send.ts
+ * each node value in a progress line, since escape sequences from a node could rewrite the
+ * screen or set the clipboard (OSC 52). JSON.stringify escapes C0 controls only, so the report
+ * disclosure verify prints as JSON, without this, can still carry C1 controls in the transaction
+ * hashes a receipt names.
+ */
+export function printable(text: string): string {
+  return text.replace(
+    /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g,
+    (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"),
+  );
+}
+
 function asciiString(text: string): string {
   const escaped = text.replace(
     /["\\]|[^ -~]/g,

@@ -94,7 +94,7 @@ packages, including the circuit toolchain (circom2 and snarkjs).
 ```sh
 npm ci                  # install the pinned npm packages (or: just install)
 just test               # what CI's test job runs: the four recipes below
-just check-artifacts    # rebuild the circuit and dispatcher, compare with core/artifacts/
+just check-artifacts    # rebuild the circuit, dispatcher and verifier, compare with the repo
 just check              # type, format, gas, activation and compiler-settings checks
 just test-ts            # the TypeScript tests: node --test test/*.test.ts
 just test-contracts     # format, lint and test the contracts with Forge
@@ -209,7 +209,8 @@ The proof names a secp256k1 authorizer, which the wallet makes fresh for each
 spend. Its signature covers the
 whole transaction, including the proof, the recent-root tuple and the fourth
 frame. The proof's `fee` must cover the transaction's maximum cost; any unused
-part stays in the pool.
+part stays in the pool for good, and the October 2026 testnet spends used only
+14% to 44% of their maximum cost at the default limits.
 
 The wallet chooses the fourth frame's limits. Intrinsic gas plus every frame's
 execution limit, or the calldata floor when larger, must fit EIP-7825's `2^24`
@@ -281,7 +282,8 @@ ciphertext and matches tags, and it tracks their spends by nullifier. A sender
 cannot recompute an outgoing secret, so after a restore it opens a new channel
 with each recipient. The change channel cannot be reopened, so a restored
 wallet, or a device taking over sending from the account, rebuilds it with
-`selfChannel` in `src/notes.ts`, past the indices it may have used. A sender
+`selfChannel` in `src/notes.ts`, 10 indices past the change notes in finalized
+blocks ([SECURITY.md](SECURITY.md#note-delivery) says when that is safe). A sender
 reserves an index in its saved state before broadcasting a new payment, because
 a repeated index repeats the tag, key and `rho`, and retries a payment that did
 not land with the same note. It also keeps fewer than 20 payments per channel
@@ -295,11 +297,11 @@ its direct secrets. `scan` and `direct-secret` need the config of a
 
 `scan` reads finalized blocks only and keeps its state in an owner-only file.
 It reads every shield and settlement apart, even several in one transaction. A
-node may leave a call's logs out of `eth_getLogs`, as ethrex does for every log
-of a frame transaction whose fourth frame failed. Once a later leaf shows the
-gap, or begins a new epoch before the last one was seen full, `scan` rebuilds
-the call from block receipts, and it stops if leaves are still missing rather
-than hide notes ([one exception](SECURITY.md#note-delivery)). `direct-secret`
+node may leave a call's logs out of `eth_getLogs`, as ethrex `247e2dd2` does for
+every log of a frame transaction whose fourth frame failed. Once a later leaf
+shows the gap, or begins a new epoch before the last one was seen full, `scan`
+rebuilds the call from block receipts, and it stops if leaves are still missing
+rather than hide notes ([one exception](SECURITY.md#note-delivery)). `direct-secret`
 needs a state that has been scanned, and hands out numbers only within 20 of
 the highest one paid, which is how far a scan from the seed looks. History
 older than Ethereum's retention window (EIP-4444) comes from archives, as it
@@ -356,10 +358,10 @@ they landed. `notes scan` finds a wallet's notes, but no command spends them
 yet.
 
 ```sh
-# Deposit one of a fixture's notes, paid by the funded account.
-printf '%s\n' "$FUNDED_KEY" | node src/cli/pool.ts RPC CONFIG FIXTURE shield [--note N]
+# Deposit one of a fixture's notes, paid by the funded account, whose key it prompts for.
+node src/cli/pool.ts RPC CONFIG FIXTURE shield [--note N]
 # Publish an epoch's root to EIP-8272, so that spends can prove against it.
-printf '%s\n' "$FUNDED_KEY" | node src/cli/pool.ts RPC CONFIG FIXTURE publish [--epoch N]
+node src/cli/pool.ts RPC CONFIG FIXTURE publish [--epoch N]
 # Send a fixture's transfer against the root that slot N published.
 node src/cli/pool.ts RPC CONFIG FIXTURE transfer [--spend-key NAME] [--root-slot N]
 # Send a fixture's withdrawal; its fourth frame claims the credit unless --no-tail.
@@ -385,9 +387,10 @@ node src/cli/smoke.ts [--random --chain-id=N --pool-address=0x... --recipient=0x
 node src/cli/nonce-race.ts --pool-address=0x... [--random] [--rpc=URL] [--output=PATH]
 ```
 
-`--spend-key` names the fixture's spend entry, such as `withdraw_seed` or a
-nonce-race fixture's `transfer_c`. Every pool command accepts `--dry-run`,
-which signs the transaction and asks the RPC to simulate it without sending it.
+`--spend-key` takes the name of a fixture's spend entry, such as `withdraw_seed`
+or a nonce-race fixture's `transfer_c`, never the `spend_key` value inside one.
+Every pool command accepts `--dry-run`, which signs the transaction and asks
+the RPC to simulate it without sending it.
 The RPC still sees the signed transaction and could broadcast it. A transfer or
 withdrawal without `--root-slot` uses the slot the config records for it. The
 four `--action-*` options replace a spend's fourth frame with a custom call
@@ -473,14 +476,20 @@ or `-->` assignment, which sets a signal without constraining it. That check
 reads only `spend.circom`'s own source, so it does not catch every
 unconstrained signal.
 
-The tests rebuild the circuit and require byte-identical R1CS and WASM. The
+The tests rebuild the circuit and require byte-identical R1CS and WASM, and
+regenerate the verifier from the proving key and require the committed file. The
 committed artifacts come from circom2 0.2.8; 0.2.23 does not reproduce them
 byte for byte, so a compiler upgrade means a new reviewed artifact set.
+circom's optimizer removes the private `fee` input, which conservation
+determines, yet the R1CS header still counts 96 private inputs. A tool that
+reads private inputs by position (wires 4 to 99) therefore takes wire 99, the
+first nullifier, for one of them. Map wires by name through a `--sym` build, as
+`test/circuit.test.ts` does.
 `tools/setup.sh` runs a new single-party test setup, not a ceremony. Run it
 only to replace the test setup on purpose, then rebuild the activation manifest
 and proof fixtures. The activation gate checks that the proving key's A and B
-terms come from the committed R1CS and that the verifier holds the key's
-verification key; the rest of the key needs the phase-1 file (`--ptau`, see
+terms come from the committed R1CS and that the verifier's constants are the
+key's verification key; the rest of the key needs the phase-1 file (`--ptau`, see
 [SECURITY.md](SECURITY.md#assumptions)), without which the gate refuses a
 manifest marked `production: true`.
 

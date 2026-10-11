@@ -17,9 +17,12 @@ import { CheckError } from "../src/errors.ts";
 import { canonical, stringify } from "../src/json.ts";
 import { field, get, object, parseInOrder, readText, utf8 } from "./check.ts";
 
+// compilation_restrictions and additional_compiler_profiles compile matching files with other
+// settings than the profile's, so they are pinned too.
 const KEYS = (
   "solc optimizer optimizer_runs optimizer_details via_ir evm_version bytecode_hash " +
-  "cbor_metadata use_literal_content revert_strings libraries remappings"
+  "cbor_metadata use_literal_content revert_strings libraries remappings " +
+  "compilation_restrictions additional_compiler_profiles"
 ).split(" ");
 
 // Objects are Maps in file order, so profiles are checked in the manifest's order, and an

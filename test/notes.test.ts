@@ -6,21 +6,26 @@
  * what the pool emits, and the notes CLI runs as a user runs it, against a local JSON-RPC server
  * serving the same logs and receipts.
  *
- * Run: node --test test/notes.test.ts (about 4 s, most of it the 30 CLI runs). ML-KEM
+ * Run: node --test test/notes.test.ts (about 5 s, most of it the 35 CLI runs). ML-KEM
  * encapsulation draws fresh randomness, so ciphertexts differ between runs; every outcome
  * checked here does not depend on them.
  */
 import assert from "node:assert/strict";
+import nodeCrypto from "node:crypto";
 import {
   chmodSync,
+  existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmdirSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -42,7 +47,7 @@ import {
   nullifier,
 } from "../src/protocol.ts";
 import { seededRng } from "../src/random.ts";
-import { RpcChain } from "../src/rpc.ts";
+import { RpcChain, TOO_LARGE } from "../src/rpc.ts";
 import {
   Scanner,
   decodeNotesData,
@@ -239,6 +244,9 @@ test("keys and addresses: derived from the seed and account, and checked on deco
   const ff = new Uint8Array(1152).fill(0xff);
   refused("ML-KEM-768 key is invalid", good.subarray(0, 33), ff, good.subarray(-32));
   raises(() => n.Address.decode("0xzz"), "an address is hex");
+  for (const data of [null, [...good]]) {
+    raises(() => n.Address.decode(data as never), "an address is hex or bytes");
+  }
   raises(() => n.directChannel(ALICE.ownerPk, utf8("short")), "32 bytes");
 });
 
@@ -260,7 +268,7 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   assert.equal(bob.unspent().length, 5);
   assert.equal(alice.unspent().length, 5);
   // Any ciphertext decapsulates, to a pseudorandom key if it was meant for another wallet, so a
-  // wallet watches only the keys its notes opened under: Alice's three paid channels, Carol's
+  // wallet watches only the keys whose tags its notes carry: Alice's three paid channels, Carol's
   // payment to Bob, and none for Carol.
   const kemChannels = (s: Scanner) => s.incoming.filter((i) => i.kind === "kem").length;
   assert.deepEqual([alice, bob, carol].map(kemChannels), [3, 1, 0]);
@@ -274,7 +282,11 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   const notes = n.spendNotes(late.note, late.note);
   const leaf = { cm: late.cm, epoch: 1n, index: 0n };
   const twice = { block: 1n, tx: 0n, call: 0, notes, leaves: [leaf], spent: [] };
-  const lateFound = new Scanner(ALICE, CHAIN, POOL).scan(twice);
+  // A fresh scan cannot begin at epoch 1, since a node that served nothing of epoch 0 would hide
+  // its notes. A scanner that has seen epoch 0 full takes the leaf.
+  raises(() => new Scanner(ALICE, CHAIN, POOL).scan(twice), "missing pool logs");
+  const fullEpoch0 = { ...new Scanner(ALICE, CHAIN, POOL).toJson(), tree: { "0": TREE_CAPACITY } };
+  const lateFound = Scanner.fromJson(ALICE, parse(stringify(fullEpoch0))).scan(twice);
   assert.equal(lateFound.length, 1);
   assert.equal(lateFound[0].nullifier, nullifierOf(ALICE, late.cm, 0n, 1n));
   // A direct secret past the gap stays hidden until the wallet looks further.
@@ -286,6 +298,11 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   for (const event of chain.events.slice(3)) resumed.scan(event);
   assert.deepEqual(resumed.toJson().notes, alice.toJson().notes);
   raises(() => Scanner.fromJson(BOB, alice.toJson()), "another wallet");
+  // Each note found raises one secret's next_index by at most LOOKAHEAD, so a larger sum is a
+  // corrupt file, whose tags would take without end to derive.
+  const corrupt = alice.toJson();
+  corrupt.incoming[0].next_index += BigInt(n.LOOKAHEAD * alice.notes.size) + 1n;
+  raises(() => Scanner.fromJson(ALICE, parse(stringify(corrupt, 1))), "exceed its notes");
   // A node that drops a transaction's logs is caught by the next leaf's index.
   const [e0, e1] = chain.events;
   raises(() => recover(ALICE, [e0, e1, ...chain.events.slice(3)]), "missing pool logs");
@@ -300,6 +317,11 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   assert.ok(!used.has(toHex(change.note.subarray(0, 16))));
   chain.add(n.spendNotes(dummy(), change.note), [change.cm], [20n, 21n]);
   assert.ok(values(recover(BOB, chain.events)).includes(ETH / 7n));
+  // A second takeover on the same finalized view resumes at the index `restored` used, so it
+  // waits until that change is final (SECURITY.md#note-delivery), and then moves past it.
+  assert.equal(n.selfChannel(bob).nextIndex, next + BigInt(n.RESTORE_SKIP));
+  const final = n.selfChannel(recover(BOB, chain.events)).nextIndex;
+  assert.equal(final, next + 2n * BigInt(n.RESTORE_SKIP) + 1n);
   for (let i = 0; i < n.LOOKAHEAD - n.RESTORE_SKIP - 1; i++) n.reserve(restored, 1n);
   raises(() => n.reserve(restored, 1n), "the recipient watches only");
 });
@@ -447,11 +469,80 @@ test("log decoding: every wallet reads a transaction's calls apart; bad logs are
   raises(() => eventsFromLogs(logs.filter((l) => l !== lastNotes)), "has no Notes log");
   const firstSpent = logs.find((l) => l.topics[0] === NOTE_SPENT);
   raises(() => eventsFromLogs(logs.filter((l) => l !== firstSpent)), "missing pool logs");
+  const firstLeaf = logs.find((l) => l.topics[0] === LEAF_APPENDED);
+  raises(() => eventsFromLogs(logs.filter((l) => l !== firstLeaf)), "missing pool logs");
   // Notes data with another offset, or a length no call emits, is malformed.
   const word = (value: bigint) => hex32(value).slice(2);
-  for (const data of [word(64n) + "00".repeat(64), word(32n) + word(97n) + "00".repeat(97)]) {
+  const offset64 = word(64n) + word(48n) + "00".repeat(48);
+  for (const data of [offset64, word(32n) + word(97n) + "00".repeat(97)]) {
     raises(() => decodeNotesData("0x" + data), "malformed Notes log");
   }
+});
+
+test("16 MiB of hex is read without overflowing the stack, and malformed hex is refused", () => {
+  // A node's Notes log can carry that much data under rpc()'s cap. fromHex's pattern once had a
+  // repeated group, which overflowed V8's stack on 8 MiB of digits and crashed the CLI.
+  const digits = "00".repeat(8 * 2 ** 20);
+  assert.equal(fromHex("0x" + digits, "data").length, 8 * 2 ** 20);
+  raises(() => decodeNotesData("0x" + digits), "malformed Notes log");
+  // A pasted address goes through the same kind of check, which had the same pattern.
+  raises(() => n.Address.decode("0x" + digits), "an address is");
+  for (const text of ["0x0g", "0x0\n"]) raises(() => n.Address.decode(text), "an address is hex");
+  assert.deepEqual(fromHex("0x", "data"), new Uint8Array());
+  assert.deepEqual(fromHex("0xAbcD", "data"), new Uint8Array([0xab, 0xcd]));
+  // Each refused string but "0x0" and "0x000" has an even length, so the pattern refuses it.
+  const message = "data must be 0x-prefixed hex with whole bytes";
+  for (const text of ["", "00", "0X00", "0x0", "0x000", "0x0g", "0x0\n", "  0x00", 0, null]) {
+    assert.throws(() => fromHex(text, "data"), { message }, JSON.stringify(text));
+  }
+});
+
+/** What fn returns, and how many HMACs it computed; src/notes.ts derives each tag with one. */
+function countingHmacs<T>(fn: () => T): [T, number] {
+  const { createHmac } = nodeCrypto;
+  let count = 0;
+  nodeCrypto.createHmac = (...args: Parameters<typeof createHmac>) => {
+    count++;
+    return createHmac(...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    return [fn(), count];
+  } finally {
+    nodeCrypto.createHmac = createHmac;
+    syncBuiltinESMExports();
+  }
+}
+
+test("a payment at the far edge of a channel's window derives only the tags it newly covers", () => {
+  // Each payment at the edge moves the window LOOKAHEAD indices on, and the scanner derives only
+  // the tags a move adds, so a scan takes between LOOKAHEAD and 2 LOOKAHEAD HMACs per payment.
+  // Deriving the whole window again on every move would take about LOOKAHEAD * K^2 / 2. The last
+  // payment sits at the first index the last move added, which an off-by-one would miss.
+  const [L, K] = [n.LOOKAHEAD, 100];
+  const secret = ALICE.directSecret(5n);
+  const chain = new Chain();
+  const pay = (index: bigint) => {
+    const { note, rho } = n.sealNote(secret, index, ETH);
+    chain.add(n.shieldNotes(note), [n.outputCommitment(ALICE.ownerPk, rho, ETH)], [], SHIELD);
+  };
+  for (let j = 1; j <= K; j++) pay(BigInt(j * L - 1));
+  pay(BigInt(K * L));
+  const [scanner, hmacs] = countingHmacs(() => recover(ALICE, chain.events));
+  assert.equal(scanner.notes.size, K + 1);
+  assert.ok(hmacs > L * K && hmacs < 2 * L * (K + 1), `${hmacs} HMACs`);
+});
+
+test("a ciphertext that lands twice opens one channel", () => {
+  // A shield retried with the same bytes can land twice, since a shield spends no nullifier.
+  const chain = new Chain();
+  const shield = paid(ALICE.ownerPk, n.openChannel(ALICE.address()), ETH);
+  for (let i = 0; i < 2; i++) {
+    chain.add(n.shieldNotes(shield.note, shield.ciphertext), [shield.cm], [], SHIELD);
+  }
+  const scanner = recover(ALICE, chain.events);
+  assert.equal(scanner.incoming.filter((i) => i.kind === "kem").length, 1);
+  assert.equal(scanner.notes.size, 2);
 });
 
 test("channels: one ciphertext per transaction, a bounded window, and late payments found", () => {
@@ -778,6 +869,135 @@ test("state upgrade: a rescan finds the payment an earlier version missed and ke
   assert.equal(scanner.issueDirect(), 5n);
 });
 
+test("a finalized head behind the state's last scan is refused, not taken as nothing new", async () => {
+  // A node reported a head far past the chain's. Every later payment would sit below the saved
+  // checkpoint, so an honest node's scan must stop rather than find nothing.
+  const chain = story();
+  const finalized = { block: 10n ** 12n };
+  const node = await serve(chain, finalized);
+  try {
+    const scanner = new Scanner(ALICE, CHAIN, POOL);
+    await scanToFinalized(scanner, new RpcChain(node.url), 0n, Number.MAX_SAFE_INTEGER);
+    assert.equal(scanner.scannedBlock, 10n ** 12n);
+    finalized.block = 10n ** 12n - 1n;
+    await assert.rejects(scanToFinalized(scanner, new RpcChain(node.url), 0n), /is behind block/);
+    finalized.block = chain.events.at(-1)!.block;
+    await assert.rejects(scanToFinalized(scanner, new RpcChain(node.url), 0n), /is behind block/);
+  } finally {
+    await node.close();
+  }
+});
+
+test("each eth_getLogs or eth_getBlockReceipts reply is applied before the next is read", async () => {
+  // Replies under rpc()'s cap, kept until the last one arrives, would fill the heap and abort
+  // the process before any of them is checked, so a malformed first reply stops the scan.
+  const chain = new Chain();
+  chain.size = 5n; // a shield at leaf 5 shows leaves 0 to 4 left out, so scan reads receipts
+  const deposit = paid(BOB.ownerPk, n.directChannel(BOB.ownerPk, BOB.selfSecret), ETH);
+  chain.add(n.shieldNotes(deposit.note), [deposit.cm], [], SHIELD);
+  const notesLog = { address: hexPadded(POOL, 40), topics: [NOTES], data: "0x" };
+  const receipts = [{ transactionIndex: "0x0", status: "0x1", logs: [notesLog] }];
+  const cases = [
+    ["eth_getLogs", [[{}]], /a log must be a JSON object/],
+    ["eth_getBlockReceipts", rpcLogs(chain), /malformed Notes log/],
+  ] as const;
+  for (const [method, logs, refusal] of cases) {
+    const node = await rpcServer((call) => ({
+      result: {
+        eth_chainId: hexPadded(CHAIN, 1),
+        eth_getLogs: logs,
+        eth_getBlockReceipts: receipts,
+      }[call.method] ?? { number: "0xc8" },
+    }));
+    try {
+      const scanner = new Scanner(ALICE, CHAIN, POOL);
+      await assert.rejects(scanToFinalized(scanner, new RpcChain(node.url), 0n, 10), refusal);
+      assert.equal(node.requests.filter((r) => r.method === method).length, 1);
+    } finally {
+      await node.close();
+    }
+  }
+});
+
+test("a receipts reply over 16 MiB is read whole, so filling a block with logs cannot stop a scan", async () => {
+  // ethrex leaves Alice's second payment out of eth_getLogs, so the scan reads its block's
+  // receipts. Anyone can fill that block with logs: here one frame transaction of 42,000 empty
+  // logs, about what EIP-7825's 2^24 gas buys, which ethrex lists in its frame and again in its
+  // top-level logs. That one receipt passes rpc()'s 16 MiB cap, which receipts are exempt from.
+  const chain = new Chain();
+  const toAlice = n.directChannel(ALICE.ownerPk, ALICE.directSecret(0n));
+  for (const value of [7n, 8n, 9n]) {
+    const { note, cm } = paid(ALICE.ownerPk, toAlice, value);
+    chain.add(n.shieldNotes(note), [cm], [], SHIELD);
+  }
+  const hidden = chain.events[1];
+  const [block, tx] = [hexPadded(hidden.block, 1), hexPadded(hidden.tx + 1n, 1)];
+  const logs = Array.from({ length: 42_000 }, (_, i) => ({
+    address: "0x" + "22".repeat(20),
+    topics: [],
+    data: "0x",
+    blockNumber: block,
+    transactionHash: hexPadded(hidden.block, 64),
+    transactionIndex: tx,
+    blockHash: hexPadded(hidden.block, 64),
+    logIndex: hexPadded(BigInt(i), 1),
+    removed: false,
+  }));
+  const filler = {
+    transactionIndex: tx,
+    status: "0x1",
+    logs,
+    frameReceipts: [{ status: "0x1", logs }],
+  };
+  assert.ok(JSON.stringify(filler).length > 16 * 2 ** 20);
+  const receipts = (block: bigint) => [
+    ...chain.events
+      .filter((e) => e.block === block)
+      .map((e) => ({ transactionIndex: hexPadded(e.tx, 1), status: "0x1", logs: callLogs(e) })),
+    ...(block === hidden.block ? [filler] : []),
+  ];
+  const visible = rpcLogs(chain, [1]);
+  const node = await rpcServer(({ method, params }) => {
+    if (method === "eth_getBlockReceipts") return { result: receipts(BigInt(params[0])) };
+    if (method === "eth_getTransactionReceipt" || method === "eth_getTransactionByHash") {
+      return { result: filler };
+    }
+    const head = { number: hexPadded(chain.events.at(-1)!.block, 1) };
+    return { result: { eth_chainId: hexPadded(CHAIN, 1), eth_getLogs: visible }[method] ?? head };
+  });
+  try {
+    const scanner = new Scanner(ALICE, CHAIN, POOL);
+    const rpcChain = new RpcChain(node.url);
+    await scanToFinalized(scanner, rpcChain, 0n);
+    const read = node.requests.filter((r) => r.method === "eth_getBlockReceipts");
+    assert.ok(read.some((r) => BigInt(r.params[0]) === hidden.block));
+    assert.deepEqual(
+      scanner.unspent().map((note) => note.value),
+      [7n, 8n, 9n],
+    );
+    const receipt = await rpcChain.call("eth_getTransactionReceipt", [hexPadded(1n, 64)]);
+    assert.equal((receipt as typeof filler).logs.length, 42_000);
+    // Only the two receipt methods are exempt: the same reply to any other call is refused.
+    await assert.rejects(rpcChain.call("eth_getTransactionByHash", [hexPadded(1n, 64)]), {
+      message: `eth_getTransactionByHash request failed: ${TOO_LARGE}`,
+    });
+  } finally {
+    await node.close();
+  }
+});
+
+test("a reply that arrives in many parts is read whole", async () => {
+  // rpc() copies a capped reply's parts into a buffer it enlarges as they arrive, starting at
+  // 4,096 bytes, so this 69 KB reply sent 1,000 bytes at a time outgrows it several times.
+  const result = Array.from({ length: 1000 }, (_, i) => hexPadded(BigInt(i), 64));
+  const node = await rpcServer(() => ({ result, part: 1000 }));
+  try {
+    assert.deepEqual(await new RpcChain(node.url).call("eth_getLogs", []), result);
+  } finally {
+    await node.close();
+  }
+});
+
 test("state upgrade: a rescan through a node that serves nothing of epoch 0 stops", async () => {
   // The earlier version missed Alice's payment in epoch 0's last leaf. This node serves nothing
   // of epoch 0 but that payment's receipt, so the rescan's first leaf in logs is epoch 1's first.
@@ -818,6 +1038,7 @@ test("CLI: scan and direct-secret keep owner-only state and hand out each number
     assert.equal((await cli(["address", ...seedFile])).trim(), ALICE.address().hex());
     const secondAccount = new n.WalletKeys(seedOf("alice"), 1n).address().hex();
     assert.equal((await cli(["address", "--account", "1", ...seedFile])).trim(), secondAccount);
+    await cli(["address", "--account", String(1n << 256n), ...seedFile], "below 2^256");
 
     const state = join(dir, "state.json");
     const v2 = writeConfig(dir, node.url, { profile: "position-notes-v2" });
@@ -887,6 +1108,68 @@ test("CLI: scan and direct-secret keep owner-only state and hand out each number
     // A config naming another pool than the state file's is refused.
     const pool2 = writeConfig(dir, node.url, { pool: hexPadded(POOL + 1n, 40) });
     await cli(["scan", "--config", pool2, "--state", state, ...seedFile], "another chain or pool");
+  } finally {
+    await node.close();
+  }
+});
+
+test("CLI: a state named through a symbolic link is locked and saved as the file it names", async () => {
+  // A save renames a new file over the path it is given. Through the link itself, the first save
+  // would replace the link with a file, and the file it named would hand out the same numbers.
+  const chain = story();
+  const node = await serve(chain, { block: chain.block });
+  const dir = mkdtempSync(join(TMP, "link-"));
+  try {
+    const [state, link] = [join(dir, "state.json"), join(dir, "link.json")];
+    const config = writeConfig(dir, node.url);
+    const args = (path: string) => ["--config", config, "--state", path, "--seed-file", SEED];
+    await cli(["scan", ...args(state)]);
+    symlinkSync(state, link);
+    assert.equal(record(await cli(["direct-secret", ...args(link)])).number, 4);
+    assert.ok(lstatSync(link).isSymbolicLink());
+    assert.equal(record(await cli(["direct-secret", ...args(state)])).number, 5);
+    // A run through the link waits for the lock that a run through the file holds.
+    mkdirSync(`${state}.lock.d`);
+    const before = readFileSync(state, "utf8");
+    const waiting = directSecretCommand({ keys: ALICE, config, state: link });
+    await sleep(300);
+    assert.equal(readFileSync(state, "utf8"), before);
+    rmdirSync(`${state}.lock.d`);
+    assert.equal(record(await waiting).number, 6);
+  } finally {
+    await node.close();
+  }
+});
+
+test("CLI: a node's oversized reply is refused before parsing, and the state lock is released", async () => {
+  // About 18 MiB of tiny values. Parsed with exact integers, 200 MiB of them aborts V8, which
+  // skips the exit handler that removes the lock.
+  const huge = new Array(9 * 2 ** 20).fill(0);
+  const node = await rpcServer(({ method }) => ({
+    result: { eth_chainId: hexPadded(CHAIN, 1), eth_getLogs: huge }[method] ?? { number: "0x10" },
+  }));
+  const dir = mkdtempSync(join(TMP, "huge-"));
+  try {
+    const state = join(dir, "state.json");
+    const config = writeConfig(dir, node.url);
+    const scan = ["scan", "--config", config, "--state", state, "--seed-file", SEED];
+    await cli(scan, "the reply is larger than 16 MiB; pass a smaller --chunk");
+    assert.equal(existsSync(`${state}.lock.d`), false);
+  } finally {
+    await node.close();
+  }
+});
+
+test("only a reply past the cap gets the --chunk hint", async () => {
+  // A smaller range does not help a node that fails for another reason.
+  const node = await rpcServer(({ method }) =>
+    method === "eth_getLogs"
+      ? { status: 503 }
+      : { result: { eth_chainId: hexPadded(CHAIN, 1) }[method] ?? { number: "0x10" } },
+  );
+  try {
+    const scan = scanToFinalized(new Scanner(ALICE, CHAIN, POOL), new RpcChain(node.url), 0n);
+    await assert.rejects(scan, { message: "eth_getLogs request failed: HTTP 503" });
   } finally {
     await node.close();
   }

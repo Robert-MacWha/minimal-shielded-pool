@@ -11,7 +11,7 @@ install:
 # What CI's test jobs run, in the same order.
 test: check-artifacts check test-ts test-contracts
 
-# Rebuild the circuit and dispatcher, and check them against core/artifacts/.
+# Rebuild the circuit, dispatcher and verifier, and check them against the committed files.
 check-artifacts:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -24,6 +24,12 @@ check-artifacts:
     node tools/dispatcher.ts --artifact >/dev/null
     git diff --exit-code -- core/artifacts/shielded_pool_dispatcher_init.hex
     node tools/dispatcher.ts --initcode 0x0000000000000000000000000000000000000001 0x0000000000000000000000000000000000000002 >/dev/null
+    # check-activation compares only the verifier's constants, so regenerate the whole
+    # verifier from the proving key, as tools/setup.sh does, and require the committed file.
+    node_modules/.bin/snarkjs zkey export solidityverifier core/artifacts/spend_final.zkey core/contracts/src/Groth16Verifier.sol >/dev/null
+    node tools/patch-verifier.ts >/dev/null
+    (cd core/contracts && forge fmt src/Groth16Verifier.sol >/dev/null)
+    git diff --exit-code -- core/contracts/src/Groth16Verifier.sol
 
 # Type-check and format-check the TypeScript, then the gas, activation and
 # compiler-settings checks.

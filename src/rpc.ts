@@ -55,16 +55,19 @@ export async function rpc(
     throw fail("not a valid HTTP URL");
   }
   let response: Response;
-  let text: string;
+  let text: string | null;
   try {
     const headers = { "content-type": "application/json" };
     const signal = AbortSignal.timeout(timeoutMs);
     response = await fetch(url, { method: "POST", headers, body, redirect: "error", signal });
-    text = await response.text();
+    text = UNCAPPED.has(method)
+      ? await response.text()
+      : await cappedText(response, MAX_REPLY_BYTES);
   } catch (error) {
     throw fail(transportReason(error, timeoutMs));
   }
   if (!response.ok) throw fail(`HTTP ${response.status}`);
+  if (text === null) throw fail(TOO_LARGE);
   let reply: unknown;
   try {
     reply = parse(text);
@@ -75,6 +78,42 @@ export async function rpc(
   if (Object.hasOwn(reply, "error")) throw new RpcError(method, reply.error);
   if (!Object.hasOwn(reply, "result")) throw new RpcError(method, undefined);
   return reply.result;
+}
+
+// parse()'s reviver reads each value's source text, so a reply of many tiny values can take over
+// 100 times its size in heap: 64 MiB of them drive V8 to its default heap limit, and 200 MiB abort
+// the process, skipping the exit handlers that release a wallet's state lock. A reply is read up
+// to this cap, except a receipt's: anyone can fill a block with logs, and ethrex repeats each
+// frame's logs in its receipt's top-level logs, so one block's receipts, or even one
+// transaction's, can honestly pass the cap, and nothing splits them. A receipt reply is read
+// whole, so the node, or anyone on a plain-http path to it, can still abort the process with one;
+// the next run on the same host then takes over the state lock it left (withLock).
+const MAX_REPLY_BYTES = 16 * 2 ** 20;
+const UNCAPPED = new Set(["eth_getBlockReceipts", "eth_getTransactionReceipt"]);
+/** rpc()'s reason for refusing a reply past the cap. */
+export const TOO_LARGE = `the reply is larger than ${MAX_REPLY_BYTES >> 20} MiB`;
+
+/**
+ * The body as text, or null once it passes limit bytes, after which the rest is not read. Each
+ * part is copied out as it arrives: a body sent in millions of one-byte parts would otherwise
+ * hold an object per byte.
+ */
+async function cappedText(response: Response, limit: number): Promise<string | null> {
+  let body = new Uint8Array(4096);
+  let size = 0;
+  for await (const part of response.body ?? []) {
+    // Leaving the loop cancels the stream.
+    if (size + part.length > limit) return null;
+    if (size + part.length > body.length) {
+      const larger = new Uint8Array(Math.min(limit, 2 * (size + part.length)));
+      larger.set(body.subarray(0, size));
+      body = larger;
+    }
+    body.set(part, size);
+    size += part.length;
+  }
+  // As response.text() decodes: UTF-8, a leading byte order mark dropped.
+  return new TextDecoder().decode(body.subarray(0, size));
 }
 
 // Node's error codes (ECONNREFUSED, ENOTFOUND) and fetch's own reasons ("unexpected
@@ -251,23 +290,35 @@ export class RpcChain implements Chain {
     });
   }
 
-  /** The pool's logs from fromBlock to the head, in one eth_getLogs call. */
+  /**
+   * The pool's logs from fromBlock to the latest block, 2,000 blocks per eth_getLogs call, as
+   * notes scan reads them by default. One call over the whole history would pass rpc()'s cap
+   * once the pool held about 25,000 shields.
+   */
   async logs(address: bigint, topics: readonly unknown[], fromBlock = 0n): Promise<ChainLog[]> {
-    const filter = {
-      address: hexPadded(address, 40),
-      topics,
-      fromBlock: hexPadded(fromBlock, 1),
-      toBlock: "latest",
-    };
-    const found = await this.call("eth_getLogs", [filter]);
-    return answer("eth_getLogs", () => {
-      if (!Array.isArray(found)) throw new Error("not a list of logs");
-      return found.map((log: unknown) => {
-        const tx = isObject(log) ? log.transactionHash : undefined;
-        if (typeof tx !== "string") throw new Error("a log has no transactionHash");
-        return { tx: tx.toLowerCase(), ...rawLog(log) };
+    const latest = await this.call("eth_blockNumber", []);
+    const head = answer("eth_blockNumber", () => parseHex(latest, "the block number"));
+    const logs: ChainLog[][] = [];
+    for (let start = fromBlock; start <= head; start += 2000n) {
+      const end = start + 1999n < head ? start + 1999n : head;
+      const filter = {
+        address: hexPadded(address, 40),
+        topics,
+        fromBlock: hexPadded(start, 1),
+        toBlock: hexPadded(end, 1),
+      };
+      const found = await this.call("eth_getLogs", [filter]);
+      const chunk = answer("eth_getLogs", () => {
+        if (!Array.isArray(found)) throw new Error("not a list of logs");
+        return found.map((log: unknown) => {
+          const tx = isObject(log) ? log.transactionHash : undefined;
+          if (typeof tx !== "string") throw new Error("a log has no transactionHash");
+          return { tx: tx.toLowerCase(), ...rawLog(log) };
+        });
       });
-    });
+      logs.push(chunk);
+    }
+    return logs.flat();
   }
 }
 

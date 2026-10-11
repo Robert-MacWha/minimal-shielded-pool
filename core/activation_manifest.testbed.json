@@ -56,7 +56,9 @@
       "use_literal_content": false,
       "revert_strings": null,
       "libraries": [],
-      "remappings": []
+      "remappings": [],
+      "compilation_restrictions": [],
+      "additional_compiler_profiles": []
     },
     "libsmall": {
       "solc": "0.8.30",
@@ -70,7 +72,9 @@
       "use_literal_content": false,
       "revert_strings": null,
       "libraries": [],
-      "remappings": []
+      "remappings": [],
+      "compilation_restrictions": [],
+      "additional_compiler_profiles": []
     }
   }
 }
