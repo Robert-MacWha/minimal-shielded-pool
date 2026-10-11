@@ -251,13 +251,15 @@ test("a lock whose holder died on this host is taken over, and no other lock is"
     error.message.startsWith(`${held} is held by another run`);
   // The same lock naming this live process, pid 1, which only root may signal, another host or
   // another pid namespace, or with its record missing, perhaps not written yet, or cut short, is
-  // held.
+  // held. So is a record whose pid is not a positive safe integer, such as minus the dead pid,
+  // which process.kill would read as a process group that does not exist.
   const holder = parse(record) as { pid: number; host: string; pidns: string | null };
   const held = [
     { ...holder, pid: process.pid },
     { ...holder, pid: 1 },
     { ...holder, host: `not-${holder.host}` },
     { ...holder, pidns: "pid:[1]" },
+    ...[0, -1, -holder.pid, 1.5, "123", null, 2 ** 53 + 2].map((pid) => ({ ...holder, pid })),
   ];
   for (const text of [...held.map((h) => JSON.stringify(h)), null, record.slice(0, -1)]) {
     if (text === null) rmSync(join(lock, "holder.json"));

@@ -47,7 +47,7 @@ import {
   nullifier,
 } from "../src/protocol.ts";
 import { seededRng } from "../src/random.ts";
-import { RpcChain } from "../src/rpc.ts";
+import { RpcChain, TOO_LARGE } from "../src/rpc.ts";
 import {
   Scanner,
   decodeNotesData,
@@ -958,7 +958,9 @@ test("a receipts reply over 16 MiB is read whole, so filling a block with logs c
   const visible = rpcLogs(chain, [1]);
   const node = await rpcServer(({ method, params }) => {
     if (method === "eth_getBlockReceipts") return { result: receipts(BigInt(params[0])) };
-    if (method === "eth_getTransactionReceipt") return { result: filler };
+    if (method === "eth_getTransactionReceipt" || method === "eth_getTransactionByHash") {
+      return { result: filler };
+    }
     const head = { number: hexPadded(chain.events.at(-1)!.block, 1) };
     return { result: { eth_chainId: hexPadded(CHAIN, 1), eth_getLogs: visible }[method] ?? head };
   });
@@ -974,6 +976,22 @@ test("a receipts reply over 16 MiB is read whole, so filling a block with logs c
     );
     const receipt = await rpcChain.call("eth_getTransactionReceipt", [hexPadded(1n, 64)]);
     assert.equal((receipt as typeof filler).logs.length, 42_000);
+    // Only the two receipt methods are exempt: the same reply to any other call is refused.
+    await assert.rejects(rpcChain.call("eth_getTransactionByHash", [hexPadded(1n, 64)]), {
+      message: `eth_getTransactionByHash request failed: ${TOO_LARGE}`,
+    });
+  } finally {
+    await node.close();
+  }
+});
+
+test("a reply that arrives in many parts is read whole", async () => {
+  // rpc() copies a capped reply's parts into a buffer it enlarges as they arrive, starting at
+  // 4,096 bytes, so this 69 KB reply sent 1,000 bytes at a time outgrows it several times.
+  const result = Array.from({ length: 1000 }, (_, i) => hexPadded(BigInt(i), 64));
+  const node = await rpcServer(() => ({ result, part: 1000 }));
+  try {
+    assert.deepEqual(await new RpcChain(node.url).call("eth_getLogs", []), result);
   } finally {
     await node.close();
   }
@@ -1136,6 +1154,21 @@ test("CLI: a node's oversized reply is refused before parsing, and the state loc
     const scan = ["scan", "--config", config, "--state", state, "--seed-file", SEED];
     await cli(scan, "the reply is larger than 16 MiB; pass a smaller --chunk");
     assert.equal(existsSync(`${state}.lock.d`), false);
+  } finally {
+    await node.close();
+  }
+});
+
+test("only a reply past the cap gets the --chunk hint", async () => {
+  // A smaller range does not help a node that fails for another reason.
+  const node = await rpcServer(({ method }) =>
+    method === "eth_getLogs"
+      ? { status: 503 }
+      : { result: { eth_chainId: hexPadded(CHAIN, 1) }[method] ?? { number: "0x10" } },
+  );
+  try {
+    const scan = scanToFinalized(new Scanner(ALICE, CHAIN, POOL), new RpcChain(node.url), 0n);
+    await assert.rejects(scan, { message: "eth_getLogs request failed: HTTP 503" });
   } finally {
     await node.close();
   }
