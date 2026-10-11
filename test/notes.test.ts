@@ -12,13 +12,14 @@
  */
 import assert from "node:assert/strict";
 import nodeCrypto from "node:crypto";
-import {
+import fs, {
   chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmdirSync,
   rmSync,
   statSync,
@@ -34,6 +35,7 @@ import { after, test } from "node:test";
 
 import { compareBigint, concat, fromHex, hex32, hexPadded, keccak, toHex } from "../src/bytes.ts";
 import { NotesError } from "../src/errors.ts";
+import { readPrivate } from "../src/files.ts";
 import { POOL_PROFILE, SHIELD_NOTE_BYTES, SPEND_NOTES_BYTES } from "../src/gas.ts";
 import { parse, stringify } from "../src/json.ts";
 import { directSecretCommand, scanCommand } from "../src/cli/notes.ts";
@@ -1110,6 +1112,29 @@ test("CLI: scan and direct-secret keep owner-only state and hand out each number
     await cli(["scan", "--config", pool2, "--state", state, ...seedFile], "another chain or pool");
   } finally {
     await node.close();
+  }
+});
+
+test("a seed or state file swapped for a shared one after its mode is checked is refused", () => {
+  // readPrivate checks the path's mode and then opens it. A file renamed over the path in
+  // between, here just before the open, is refused by the same check on the opened file.
+  const dir = mkdtempSync(join(TMP, "swap-"));
+  const [path, shared] = [join(dir, "seed"), join(dir, "shared")];
+  writeFileSync(path, toHex(seedOf("alice")), { mode: 0o600 });
+  writeFileSync(shared, "another file");
+  chmodSync(shared, 0o644);
+  const { openSync } = fs;
+  fs.openSync = (...args: Parameters<typeof openSync>) => {
+    if (args[0] === path) renameSync(shared, path);
+    return openSync(...args);
+  };
+  syncBuiltinESMExports();
+  try {
+    const message = `${path} is readable by other users; chmod 600 it first`;
+    assert.throws(() => readPrivate(path), { message });
+  } finally {
+    fs.openSync = openSync;
+    syncBuiltinESMExports();
   }
 });
 

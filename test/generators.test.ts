@@ -289,6 +289,26 @@ test("a lock whose holder died on this host is taken over, and no other lock is"
   assert.equal(existsSync(takeover), false);
 });
 
+test(
+  "a takeover directory that cannot be created is an error, not a busy takeover",
+  { skip: process.getuid?.() === 0 ? "root ignores directory permissions" : false },
+  async () => {
+    // Only EEXIST means another run is taking the lock over. Any other failure, here EACCES in a
+    // directory this user cannot write, is thrown, rather than refused as a busy takeover whose
+    // directory does not exist.
+    const dir = mkdtempSync(join(TMP, "read-only-"));
+    const state = join(dir, "state.json");
+    diedHolding(state);
+    const attempt = () => withLock(state, () => {}, { waitMs: 0 });
+    chmodSync(dir, 0o500);
+    try {
+      await assert.rejects(attempt(), { code: "EACCES", path: `${state}.lock.d.takeover` });
+    } finally {
+      chmodSync(dir, 0o700);
+    }
+  },
+);
+
 test("of eight runs that find one dead lock at once, exactly one takes it", async () => {
   // Eight processes run 500 rounds. Each round they find the same dead lock and try to take it
   // at the same moment, without waiting. Whichever takes it holds it until all have answered, so
