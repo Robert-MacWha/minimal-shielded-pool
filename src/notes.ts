@@ -163,7 +163,9 @@ export function outputCommitment(owner: bigint, rho: bigint, value: bigint): big
 /** The bytes of hex with or without "0x", as a person pastes a seed or an address. */
 export function pastedHex(text: string, what: string): Uint8Array {
   const digits = text.replace(/^0x/, "");
-  if (!/^([0-9a-fA-F]{2})*$/.test(digits)) throw new NotesError(`${what} is hex`);
+  if (digits.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(digits)) {
+    throw new NotesError(`${what} is hex`);
+  }
   return fromHex("0x" + digits, what);
 }
 
