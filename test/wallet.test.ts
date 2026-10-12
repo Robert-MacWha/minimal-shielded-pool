@@ -2,10 +2,10 @@
  * The wallet's tree. seededTree rebuilds a live pool's tree from its LeafAppended logs before
  * the nonce-race generator proves against it: duplicate commitments stay distinct leaves in
  * logged index order, other epochs' logs are ignored, and a mismatched epoch, gap or root stops
- * it. The smoke fixture's openings reproduce its nullifiers, Tree matches the incremental-tree
- * vectors at both depths, a new note's secrets are distinct field elements, an authorizer key is
- * never zero, each zero output must use its own position's sink, an output inner must be below
- * p, and the owner must be a nonzero address with a depth-16 path. Runtime: about 0.2 s.
+ * it. The smoke fixture's openings reproduce its nullifiers, OwnerTree matches the owner-set
+ * vectors, a new note's secrets are distinct field elements, an authorizer key is never zero,
+ * each zero output must use its own position's sink, an output inner must be below p, and the
+ * owner must be a nonzero address with a depth-16 path. Runtime: about 0.2 s.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -21,12 +21,18 @@ import {
   commitment,
   inputNullifiers,
   ownerPk,
-  p2,
   sinkOutputs,
   type Output,
 } from "../src/protocol.ts";
 import { seededRng } from "../src/random.ts";
-import { Tree, buildWitness, dummyInput, newAuthorizer, newNote } from "../src/wallet.ts";
+import {
+  OwnerTree,
+  Tree,
+  buildWitness,
+  dummyInput,
+  newAuthorizer,
+  newNote,
+} from "../src/wallet.ts";
 
 const POOL = "0x" + "12".repeat(20);
 const FILTER = { address: POOL, topics: [LEAF_APPENDED], fromBlock: "0x0", toBlock: "latest" };
@@ -119,36 +125,18 @@ test("the smoke fixture's input openings reproduce its nullifiers", () => {
   assert.equal(commitment(ownerPk(BigInt(input.owner_root), nk), rho, value), BigInt(fixture.cm_a));
 });
 
-test("Tree matches the exported incremental-tree vectors", () => {
-  const v = json("vectors/poseidon_bn254_vectors.json").tree;
-  const tree = new Tree();
-  assert.equal(tree.root(), BigInt(v.root_empty), "empty root");
-  tree.append(BigInt(v.cm0));
-  assert.equal(tree.root(), BigInt(v.root_after_cm0), "root after cm0");
-  tree.append(BigInt(v.cm1));
-  assert.equal(tree.root(), BigInt(v.root_after_cm0_cm1), "root after cm0, cm1");
-});
-
-test("a depth-16 Tree matches the exported owner set and holds 2^16 leaves", () => {
+test("a depth-16 OwnerTree matches the exported owner set and holds 2^16 leaves", () => {
   const v = json("vectors/poseidon_bn254_vectors.json").owner_set;
-  const tree = new Tree(OWNER_DEPTH);
+  const tree = new OwnerTree(OWNER_DEPTH);
   assert.equal(tree.root(), BigInt(v.root_empty), "empty root");
   for (const address of v.addresses) tree.append(BigInt(address));
   assert.equal(tree.root(), BigInt(v.root), "root");
   assert.equal(tree.authPath(0n).siblings.length, OWNER_DEPTH);
   for (let i = v.addresses.length; i < 2 ** OWNER_DEPTH; i++) tree.append(1n);
   assert.throws(() => tree.append(1n), /tree full/);
-  for (const depth of [0, 21, 1.5]) assert.throws(() => new Tree(depth), RangeError, `${depth}`);
-});
-
-test("a value note's auth path reproduces the root", () => {
-  const [nk, rho] = newNote(seededRng(1n));
-  const note = commitment(nk, rho, 10n ** 18n);
-  const tree = new Tree();
-  const { siblings, bits } = tree.authPath(tree.append(note));
-  let node = note;
-  bits.forEach((bit, d) => (node = bit === 0 ? p2(node, siblings[d]) : p2(siblings[d], node)));
-  assert.equal(node, tree.root());
+  for (const depth of [0, 17, 1.5]) {
+    assert.throws(() => new OwnerTree(depth), RangeError, `${depth}`);
+  }
 });
 
 test("a new note's nullifier key and rho are distinct field elements", () => {
@@ -165,10 +153,17 @@ test("an authorizer key is one more than its draw below n - 1, so never zero", (
   assert.deepEqual(newAuthorizer(rng)[0], word(1n));
 });
 
+/** A tree holding the five-wei note the witness tests below spend at index 0. */
+function held(): Tree {
+  const tree = new Tree();
+  tree.append(commitment(1n, 2n, 5n));
+  return tree;
+}
+
 test("a withdrawal's zero outputs must each use their own position's sink", () => {
   const inputs = [{ nk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(4n))];
   const terms = { authorizer: 1n, owner: OWNER, publicAmount: 5n, recipient: 9n };
-  const withdraw = (outputs: Output[]) => buildWitness(new Tree(), inputs, outputs, 0n, terms);
+  const withdraw = (outputs: Output[]) => buildWitness(held(), inputs, outputs, 0n, terms);
   assert.deepEqual(withdraw(sinkOutputs()).out_inner, ["1", "2"]);
   assert.throws(() => withdraw(sinkOutputs().reverse()), /must use its positional sink/);
 });
@@ -176,7 +171,7 @@ test("a withdrawal's zero outputs must each use their own position's sink", () =
 test("an output inner past p is refused, so an alias of a sink inner cannot slip through", () => {
   const inputs = [{ nk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(4n))];
   const spend = (first: Output, second: Output) =>
-    buildWitness(new Tree(), inputs, [first, second], 0n, { authorizer: 1n, owner: OWNER });
+    buildWitness(held(), inputs, [first, second], 0n, { authorizer: 1n, owner: OWNER });
   // The circuit reads P + 2 as sink inner 2 and refuses it for a positive output.
   assert.throws(() => spend([3n, 3n], [P + 2n, 2n]), /must be in \[0, p\)/);
   assert.throws(() => spend([P + 1n, 0n], [3n, 5n]), /must be in \[0, p\)/);
@@ -189,7 +184,7 @@ test("the owner is a nonzero address with a depth-16 path, and the witness carri
   const inputs = [{ nk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(5n))];
   const outputs: Output[] = [[3n, 5n], sinkOutputs()[1]];
   const spend = (owner: typeof OWNER) =>
-    buildWitness(new Tree(), inputs, outputs, 0n, { authorizer: 1n, owner });
+    buildWitness(held(), inputs, outputs, 0n, { authorizer: 1n, owner });
   const w = spend(OWNER);
   assert.equal(w.owner, String(OWNER.address));
   assert.equal(w.owner_root, String(OWNER.root));

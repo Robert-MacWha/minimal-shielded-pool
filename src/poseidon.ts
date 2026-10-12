@@ -1,6 +1,6 @@
 /**
- * circomlib's Poseidon over the BN254 scalar field: x^5 S-box, 8 full rounds plus 57 (t=3),
- * 56 (t=4) or 60 (t=12) partial rounds, state initialised as [0, in_0, ..., in_{n-1}],
+ * circomlib's Poseidon over the BN254 scalar field: x^5 S-box, 8 full rounds plus 57 (t=3)
+ * or 56 (t=4) partial rounds, state initialised as [0, in_0, ..., in_{n-1}],
  * output state[0]. The constants and the mix convention (new[i] = sum_j M[i][j] * state[j])
  * are circomlibjs's poseidon_reference.js, exported to poseidon-constants.json by
  * tools/export-vectors.ts. The spend circuit, the Solidity library generated from the same
@@ -27,7 +27,7 @@ const constants = JSON.parse(
 export const P: bigint = BigInt(constants.prime);
 
 const PARAMS = new Map<number, Params>();
-for (const t of [3, 4, 12]) {
+for (const t of [3, 4]) {
   const c = constants[`t${t}`];
   const params: Params = {
     t,
@@ -52,7 +52,7 @@ function pow5(x: bigint): bigint {
 }
 
 /**
- * Poseidon of 2, 3 or 11 inputs. Inputs are reduced modulo P first, so x and x + P hash
+ * Poseidon of 2 or 3 inputs. Inputs are reduced modulo P first, so x and x + P hash
  * alike; disclosure relies on that when it hashes a receipt's unchecked values.
  */
 export function poseidon(inputs: readonly bigint[]): bigint {

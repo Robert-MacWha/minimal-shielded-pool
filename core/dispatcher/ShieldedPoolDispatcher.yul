@@ -15,9 +15,11 @@
 /// other's transactions, so deploy the one that matches the chain.
 object "ShieldedPoolDispatcher" {
     code {
-        // ShieldedPoolLogic.currentRoot (storage slot 22) starts as EMPTY_ROOT, the root
-        // of the empty depth-20 tree.
-        sstore(22, 0x2134e76ac5d21aab186c2be1dd8f84ee880a1e46eaf712f9d371b6df22191f3e)
+        // ShieldedPoolLogic.currentRoot (storage slot 0) starts as EMPTY_ROOT, the root of
+        // the empty MMR, and its mmr.maxDepth (slot 48) as MAX_TREES, which LibSkewMmr.init
+        // would store.
+        sstore(0, 0x012893657d8eb2efad4de0a91bcd0e39ad9837745dec3ea923737ea803fc8e3d)
+        sstore(48, 20)
 
         // The deployer appends the logic and verifier addresses to this initcode as two
         // 32-byte words, as tools/dispatcher.ts --initcode does; copy them after the runtime.
@@ -76,6 +78,8 @@ object "ShieldedPoolDispatcher" {
             }
             // Amounts are below 2^128, the circuit's range check.
             function maxValue() -> v { v := 0x100000000000000000000000000000000 }
+            // ShieldedPoolLogic.MAX_TREES, the length of settle(Spend)'s frontier.
+            function maxTrees() -> n { n := 20 }
             // ShieldedPoolLogic.DOMAIN_TAG.
             function domainTag() -> v {
                 v := 0xa9d03fa1cd97bcf3294dc8e3bb024f555393c98967b356967fa502abab366ed3
@@ -139,12 +143,37 @@ object "ShieldedPoolDispatcher" {
                 a := and(mload(0), 0xffffffffffffffffffffffffffffffffffffffff)
             }
 
+            // The frontier's root as LibSkewMmrVerifier.frontierCommitment computes it:
+            // keccak256(chain, packedRanks, depth, count), where chain folds
+            // keccak256(chain, root) over the roots below depth, from zero. A nonzero root at
+            // or above depth is refused, so each frontier has one encoding in the statement.
+            // Uses memory 0 to 0x80.
+            function frontierRoot(settleIndex, packedRanks, depth, count) -> r {
+                let chain := 0
+                for { let i := 0 } lt(i, maxTrees()) { i := add(i, 1) } {
+                    let root := frameDataLoad(settleIndex, add(484, mul(i, 32)))
+                    switch lt(i, depth)
+                    case 1 {
+                        mstore(0, chain)
+                        mstore(0x20, root)
+                        chain := keccak256(0, 0x40)
+                    }
+                    default { if root { fail(errCanonical()) } }
+                }
+                mstore(0, chain)
+                mstore(0x20, packedRanks)
+                mstore(0x40, depth)
+                mstore(0x60, count)
+                r := keccak256(0, 0x80)
+            }
+
             // Checks the proof in this frame's calldata against the statement: frame
             // settleIndex's settle(Spend) values, then the owner from its signature.
             function verifyProof(settleIndex, owner) {
                 // settle((root,rootSlot,epoch,domain,nf1,nf2,out1,out2,
-                //         publicAmount,fee,recipient,authorizer)), one word each after the
-                // 4-byte selector.
+                //         publicAmount,fee,recipient,authorizer,count,packedRanks,depth,
+                //         frontier)), one word each after the 4-byte selector, and the
+                // frontier's MAX_TREES roots from offset 484.
                 let root := frameDataLoad(settleIndex, 4)
                 let rootSlot := frameDataLoad(settleIndex, 36)
                 let epoch := frameDataLoad(settleIndex, 68)
@@ -157,6 +186,9 @@ object "ShieldedPoolDispatcher" {
                 let fee := frameDataLoad(settleIndex, 292)
                 let recipient := frameDataLoad(settleIndex, 324)
                 let authorizer := frameDataLoad(settleIndex, 356)
+                let count := frameDataLoad(settleIndex, 388)
+                let packedRanks := frameDataLoad(settleIndex, 420)
+                let depth := frameDataLoad(settleIndex, 452)
 
                 // A settlement that fails after approval burns the notes, so every value
                 // settlement refuses or cannot decode is refused before approval. EIP-8250
@@ -169,6 +201,14 @@ object "ShieldedPoolDispatcher" {
                 if iszero(eq(iszero(pub), iszero(recipient))) { fail(errShape()) }
                 if iszero(eq(dom, domainVal(epoch))) { fail(errDomain()) }
 
+                // root is the one the recent-root frame names, and the statement carries the
+                // frontier, so the frontier must open root (LibSkewMmrVerifier). Its roots
+                // below depth are then the pool's Poseidon outputs, below p, and packedRanks
+                // and depth are the pool's own.
+                if shr(64, count) { fail(errCanonical()) }
+                if gt(depth, maxTrees()) { fail(errRoot()) }
+                if iszero(eq(root, frontierRoot(settleIndex, packedRanks, depth, count))) { fail(errRoot()) }
+
                 // The verifier sees only (beta, gamma, alpha), and gamma reduces each word
                 // mod p, so a word must be the canonical encoding of the circuit's field
                 // element. Otherwise a note owner could re-prove a spend with a value plus
@@ -176,7 +216,6 @@ object "ShieldedPoolDispatcher" {
                 // settlement would revert. An aliased nullifier is a fresh nonce key, so
                 // the pool would pay again on every alias.
                 let p := scalarField()
-                if iszero(lt(root, p)) { fail(errCanonical()) }
                 if iszero(lt(dom, p)) { fail(errCanonical()) }
                 if iszero(lt(nf1, p)) { fail(errCanonical()) }
                 if iszero(lt(nf2, p)) { fail(errCanonical()) }
@@ -206,24 +245,30 @@ object "ShieldedPoolDispatcher" {
                 // Hybrid compression (eprint 2025/1500): alpha = keccak256(statement) mod p,
                 // and gamma is the statement evaluated as a polynomial at alpha + beta,
                 // highest term first. The statement is written at 0x200, past the verifier
-                // call built at 0x80 below, which ends at 0x1e4. The owner is a 20-byte
-                // signer, so it needs no range check.
+                // call built at 0x80 below, which ends at 0x1e4: twelve values, then the
+                // frontier's MAX_TREES roots. The owner is a 20-byte signer, so it needs no
+                // range check.
                 let st := 0x200
                 mstore(st, nf1)
                 mstore(add(st, 0x20), nf2)
                 mstore(add(st, 0x40), out1)
                 mstore(add(st, 0x60), out2)
-                mstore(add(st, 0x80), root)
-                mstore(add(st, 0xa0), dom)
-                mstore(add(st, 0xc0), pub)
-                mstore(add(st, 0xe0), fee)
-                mstore(add(st, 0x100), recipient)
-                mstore(add(st, 0x120), authorizer)
-                mstore(add(st, 0x140), owner)
-                let alpha := mod(keccak256(st, 0x160), p)
+                mstore(add(st, 0x80), dom)
+                mstore(add(st, 0xa0), pub)
+                mstore(add(st, 0xc0), fee)
+                mstore(add(st, 0xe0), recipient)
+                mstore(add(st, 0x100), authorizer)
+                mstore(add(st, 0x120), owner)
+                mstore(add(st, 0x140), packedRanks)
+                mstore(add(st, 0x160), depth)
+                for { let i := 0 } lt(i, maxTrees()) { i := add(i, 1) } {
+                    mstore(add(st, add(0x180, mul(i, 32))), frameDataLoad(settleIndex, add(484, mul(i, 32))))
+                }
+                let stmtBytes := mul(add(12, maxTrees()), 32)
+                let alpha := mod(keccak256(st, stmtBytes), p)
                 let sigma := addmod(alpha, beta, p)
                 let gamma := 0
-                for { let o := 0x160 } o { o := sub(o, 0x20) } {
+                for { let o := stmtBytes } o { o := sub(o, 0x20) } {
                     gamma := addmod(mulmod(gamma, sigma, p), mload(add(st, sub(o, 0x20))), p)
                 }
 
@@ -314,20 +359,21 @@ object "ShieldedPoolDispatcher" {
                 // at 2,000,000 because running out of gas after approval would burn the notes.
                 if iszero(eq(frameParam(2, 0x00), address())) { fail(errShape()) }
                 if iszero(eq(frameParam(2, 0x01), 2000000)) { fail(errShape()) }
-                // tools/check-gas-profile.ts bounds settlement's new storage slots at five,
-                // conservatively: a final root, the epoch counter, two filled subtrees and a
-                // withdrawal credit. Five slots of 64 state bytes at 1,530 gas per byte
+                // tools/check-gas-profile.ts bounds settlement's new storage slots at five: two
+                // appends that each start a tree at a depth no epoch has reached write a root
+                // and a chain each, and a withdrawal credit; a rollover writes fewer. Five slots of 64 state bytes at 1,530 gas per byte
                 // (src/gas.ts) is 489,600, and the state limit is pinned at 550,000 for the
                 // same reason as the execution limit.
                 if iszero(eq(frameParam(2, 0x09), 550000)) { fail(errShape()) }
                 if iszero(eq(frameParam(2, 0x02), 2)) { fail(errShape()) }
                 if frameParam(2, 0x03) { fail(errShape()) }
-                // settle(Spend) is 388 bytes, followed by two 48-byte notes, optionally
-                // after a 1,088-byte ML-KEM-768 ciphertext. Settlement only emits them.
+                // settle(Spend) is 1,124 bytes (the selector, fifteen words and MAX_TREES roots),
+                // followed by two 48-byte notes, optionally after a 1,088-byte ML-KEM-768
+                // ciphertext. Settlement only emits them.
                 let settleLength := frameParam(2, 0x04)
-                if iszero(or(eq(settleLength, 484), eq(settleLength, 1572))) { fail(errShape()) }
+                if iszero(or(eq(settleLength, 1220), eq(settleLength, 2308))) { fail(errShape()) }
                 if frameParam(2, 0x08) { fail(errShape()) }
-                if iszero(eq(shr(224, frameDataLoad(2, 0)), 0x921fcac7)) { fail(errShape()) }
+                if iszero(eq(shr(224, frameDataLoad(2, 0)), 0x32fbc00c)) { fail(errShape()) }
 
                 // Frame 3, present when frames == 4: a generic DEFAULT call with zero value
                 // and flags to any nonzero target, the pool included. It must not be SENDER,

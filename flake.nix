@@ -22,6 +22,9 @@
           pkgs.pnpm
           pkgs.foundry
           pkgs.python3
+          # The native ethrex suite (test/native) builds with cargo.
+          pkgs.cargo
+          pkgs.rustc
         ];
       };
     };

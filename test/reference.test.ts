@@ -18,7 +18,7 @@ import { OwnerSet } from "../src/owner.ts";
 import { poseidon } from "../src/poseidon.ts";
 import * as pr from "../src/protocol.ts";
 import * as spend from "../src/spend.ts";
-import { RepeatedTree, Tree, buildWitness, type MerkleTree } from "../src/wallet.ts";
+import { Tree, buildWitness } from "../src/wallet.ts";
 
 type Json = any; // the vector files are untyped JSON
 
@@ -142,13 +142,11 @@ describe("protocol hashes (protocol.json)", () => {
     // The Python client derived the nullifier from the spend key as this one does from nk.
     nullifiers: [
       (c) => {
-        const { domain, sk: nk, cm, index } = bigs(c.in);
-        if ("error" in c) return pr.nullifier(domain, nk, cm, index);
+        const { domain, sk: nk, cm } = bigs(c.in);
         const key = pr.domainKey(domain, nk);
-        const fromKey = pr.nullifierFromKey(key, cm, index);
-        return { key, nullifier: pr.nullifier(domain, nk, cm, index), fromKey };
+        const fromKey = pr.nullifierFromKey(key, cm);
+        return { key, nullifier: pr.nullifier(domain, nk, cm), fromKey };
       },
-      InputError,
     ],
     // Pools as integers and as 0x + 40 hex digits.
     domains: [
@@ -209,44 +207,8 @@ describe("protocol hashes (protocol.json)", () => {
 
 // ===================================================================== wallet.json
 
-describe("trees and witnesses (wallet.json)", () => {
+describe("witnesses (wallet.json)", () => {
   const v = load("wallet.json");
-
-  /** A vector path: null is the empty subtree of that height, "u" the repeated one. */
-  function expectPaths(tree: MerkleTree, paths: Json[]): void {
-    for (const p of paths) {
-      const siblings = p.siblings.map((s: string | null, height: number) =>
-        s === null ? v.zeros[height] : s === "u" ? v.uniform[height] : s,
-      );
-      same(tree.authPath(big(p.index)), { siblings, bits: p.bits }, `path of ${p.index}`);
-    }
-  }
-
-  test("roots and authentication paths of trees of 0 to 40 leaves", () =>
-    each(v.trees, (c) => {
-      const tree = new Tree();
-      c.leaves.forEach((leaf: string, i: number) =>
-        assert.equal(tree.append(big(leaf)), BigInt(i)),
-      );
-      same(tree.root(), c.root);
-      expectPaths(tree, c.paths);
-    }));
-
-  test("repeated-leaf trees up to 2^20 leaves, with extras past the boundary", () =>
-    each(v.repeated, (c) => {
-      const tree = new RepeatedTree(big(c.cm), big(c.count), bigs(c.extras));
-      same([tree.uniform, tree.root()], [v.uniform, c.root]);
-      expectPaths(tree, c.paths);
-    }));
-
-  test("a tree takes 2^20 leaves and refuses one more", () => {
-    const { leaf, lastIndex } = v.fullTree;
-    const tree = new Tree();
-    let last = -1n;
-    for (let i = 0; i <= Number(lastIndex); i++) last = tree.append(big(leaf));
-    same(last, lastIndex);
-    outcome(v.fullTree, () => tree.append(big(leaf)), "own");
-  });
 
   /** A witness from a case; the owner set and its leaf come from `owner`, the first case's. */
   const witness = (c: Json, { leaves, domain, owner } = c) => {
@@ -260,8 +222,6 @@ describe("trees and witnesses (wallet.json)", () => {
     const inputs = c.inputs.map(({ sk, ...input }: Json) => bigs({ nk: input.nk ?? sk, ...input }));
     return buildWitness(tree, inputs, bigs(c.outputs), big(domain), terms);
   };
-
-  test("full circuit witnesses", () => each(v.witnesses, (c) => same(witness(c), c.witness)));
 
   // Each refusal must come from buildWitness's own checks, as each recorded one came from the
   // witness builder's: a later step refusing the same input (compressionAlpha on a negative
@@ -475,11 +435,12 @@ describe("pool calldata (abi.json)", () => {
     claim: [(c) => pr.encodeClaim(big(c.recipient)), InputError],
     proofBytes: [(c) => spend.entryProofBytes(c.entry), InputError],
     // The compressed signals [beta, gamma, alpha], with the right gamma and one off by one. The
-    // Python client's statement had ten values, so alpha is computed here as it computed it.
+    // vector's statement has no owner, so alpha is computed here over the words it has.
     verifierCalls: [
       ({ transfer: t }) => {
-        const keys = "nf1 nf2 out_cm1 out_cm2 root domain public_amount fee recipient authorizer";
-        const stmt = keys.split(" ").map((key) => big(t[key]));
+        const keys =
+          "nf1 nf2 out_cm1 out_cm2 domain public_amount fee recipient authorizer packed_ranks depth";
+        const stmt = [...keys.split(" ").map((key) => big(t[key])), ...t.frontier.map(big)];
         const words = Buffer.from(
           stmt.map((x) => x.toString(16).padStart(64, "0")).join(""),
           "hex",

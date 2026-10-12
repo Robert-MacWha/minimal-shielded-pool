@@ -44,7 +44,7 @@ of the set, the owner, and the pool requires the owner's EIP-8141 signature
 over the spend's EIP-712 intent, which EIP-8141 validates before any frame
 runs. The pool reads the owner from that signature, the proof shows it is a
 leaf of the inputs' owner set, and the circuit refuses an owner of 0, the value
-of an empty leaf. The tree's path bits must be 0 or 1, as in the note tree:
+of an empty leaf. The tree's path bits must be 0 or 1, as in the note MMR:
 otherwise a prover who knows a node's children could place any address under
 it, and so spend with a key of its own.
 
@@ -58,43 +58,47 @@ BabyJubJub in the circuit would also keep the key off the prover, at about the
 same circuit cost and with reusable keys, but only sideloaded device apps sign
 it, while stock hardware wallets and threshold signers sign EIP-712.
 
-## Notes are occurrences
+## Nullifiers bind the commitment
 
-The nullifier binds a note's epoch and leaf index, not only its commitment:
+The nullifier binds a note's epoch and commitment, not its position:
 
 ```text
-nf = Poseidon3(4, Poseidon2(D, nk), Poseidon2(cm, leaf_index))
+nf = Poseidon3(4, Poseidon2(D, nk), cm)
 ```
 
 Here `D` hashes the chain ID, the pool and the epoch of the root the spend
-proves against. Two deposits of the same commitment are therefore two notes,
-spent independently, with no uniqueness registry and no storage read during
-validation. PR 14 made this change because a duplicate output could otherwise
-revert settlement after approval. The commitment stays in the formula so that a
-zero-value dummy input, whose tree membership is not checked, cannot copy a
-funded note's nullifier.
-
-Any replacement tree must keep this property. Each insertion gets one position
-that the circuit authenticates, and no root the pool accepts may authenticate
-the same insertion at another position, or one note gets two nullifiers. A new
+proves against. Two insertions of the same commitment in one epoch share a
+nullifier, so only one of them can be spent. Wallets draw a fresh `rho` for
+every note, so commitments repeat only by mistake. Settlement still appends a
+duplicate output rather than refusing it: a refusal after approval would burn
+the spend's inputs, the reason PR 14 removed the commitment registry. The
+commitment carries the value, so a zero-value dummy input, whose tree
+membership is not checked, cannot copy a funded note's nullifier. A new
 nullifier formula needs a fresh deployment.
+
+The tree is a skew-MMR from the `@skew-mmr` packages: a frontier of at most
+`MAX_TREES` perfect trees, where every node holds a note and an append takes at
+most one Poseidon hash. The circuit opens a note without its index, so the
+nullifier cannot bind it.
 
 ## The statement is compressed
 
-A spend's statement is eleven values (`nf1, nf2, outCm1, outCm2, root, domain,
-publicAmount, fee, recipient, authorizer, owner`): the first ten in the
-settlement calldata, and the owner as the owner signature's signer.
+A spend's statement is `12 + MAX_TREES` values (`nf1, nf2, outCm1, outCm2,
+domain, publicAmount, fee, recipient, authorizer, owner, packedRanks, depth`
+and the frontier's roots): all but the owner in the settlement calldata, and
+the owner as the owner signature's signer.
 Groth16 verification costs gas per public input, so the proof exposes only
 three, using the hybrid compression of
 [eprint 2025/1500](https://eprint.iacr.org/2025/1500). With `r` the BN254
 scalar field order, the pool computes `alpha = keccak256(statement) mod r`, the
-circuit computes `beta = Poseidon(statement)`, and both evaluate `gamma`, the
-statement as a polynomial at `alpha + beta`. This saved about 44,100 gas per
-spend (PR 19).
+circuit computes `beta`, the statement chained through
+Poseidon of two, and both evaluate `gamma`, the statement as a polynomial at
+`alpha + beta`. This saved about 44,100 gas per spend (PR 19).
 
-The verifier no longer sees the statement, so the dispatcher range-checks each
-value, except the owner, which the protocol gives as a 20-byte address.
-Without that, a note owner could re-prove a spend with a value plus `r`.
+The verifier no longer sees the values, so the dispatcher range-checks each
+one, except the owner, which the protocol gives as a 20-byte address, and
+requires the frontier to open the spend's root exactly. Without that, a note
+owner could re-prove a spend with a value plus `r`.
 The proof would still verify, so the pool would approve and pay the gas, and
 settlement, which re-checks the values, would then revert. An aliased
 nullifier gives fresh nonce keys, so the pool would pay each time, and an
@@ -106,14 +110,16 @@ encoding of the values, and a mismatch shows up only as an invalid proof.
 
 The first frame runs EIP-8272's recent-root check on a `(source_id, slot,
 root)` tuple, and the dispatcher requires that tuple to name the spend's root
-and `source_id = keccak256(pool || epoch)`. Validation therefore never reads
+and `source_id = keccak256(pool || epoch)`. The root is the MMR's keccak
+commitment to its frontier, which the dispatcher recomputes from the frontier
+the statement carries. Validation therefore never reads
 pool storage. This matters because every spend has the same sender, and ethrex
 lets several of one sender's frame transactions wait in the mempool only when
 their nonce keys are disjoint and their validation reads no sender storage. The
 tuple also keeps a proof valid for EIP-8272's window while new deposits change
 the tree. Anyone can publish a root with `publishEpochRoot`, outside
 settlement, so a failed publication never consumes note keys. When the
-depth-20 tree lacks room for the notes being inserted, the pool starts a new
+epoch's MMR lacks room for the notes being inserted, the pool starts a new
 epoch first, so settlement never fails for lack of room.
 
 ## Settlement gas is pinned
@@ -138,8 +144,9 @@ with snarkjs as a library, encodes calls itself in `src/protocol.ts`, signs with
 `node:crypto`, so it starts no other program. The tools and the node:test suites
 are TypeScript too, apart from the setup and deployment shell scripts; the Forge
 tests are Solidity and the native harness is Rust. Because the client
-reimplements Poseidon, the tree, the statement and the transaction encoding, the
-tests check it against independent sources: Poseidon against circomlibjs vectors
+reimplements Poseidon, the statement and the transaction encoding, and builds
+the tree with `@skew-mmr/core`, which its own repository tests, the tests check
+it against independent sources: Poseidon against circomlibjs vectors
 (`test/poseidon.test.ts`), witnesses and statements against the committed R1CS
 and a real proof (`test/circuit.test.ts`), the smoke fixture's proof against
 the Solidity verifier in Forge, and the whole pool with real proofs and signed
@@ -148,7 +155,7 @@ transactions in the pinned ethrex VM (`test/native/`).
 The client replaced a Python one, and the reference vectors in
 `test/vectors/reference/` pin the Python client's behaviour. The Python client
 at commit `2386147` computed them, and `test/reference.test.ts` checks the
-TypeScript against every case: hashes, trees and witnesses, encodings and gas
+TypeScript against every case: hashes, witnesses, encodings and gas
 figures, signatures, and note delivery. The vectors are never regenerated from
 the TypeScript: a deliberate change to an encoding or hash updates the affected
 vectors in the same commit and says why. The fixture generators draw by default

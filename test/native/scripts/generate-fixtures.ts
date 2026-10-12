@@ -61,7 +61,7 @@ const addr = (x: bigint) => hexPadded(x, 40);
 const utf8 = (text: string) => new TextEncoder().encode(text);
 const createAddress = (nonce: bigint) =>
   toBigint(keccak(rlpList([rlpBytes(toBytes(DEPLOYER, 20)), rlpInt(nonce)])).slice(-20));
-const NAMES = ["poseidon3", "poseidon4", "verifier", "logic", "pool"];
+const NAMES = ["poseidon4", "verifier", "logic", "pool"];
 const A = Object.fromEntries(NAMES.map((name, i) => [name, createAddress(BigInt(i))]));
 const POOL = A.pool;
 
@@ -73,16 +73,20 @@ const TEST_NOTES = toHex(repeat(TEST_NOTE, 2));
 const CIPHERTEXT = repeat(keccak(utf8("minimal-shielded-pool:native-test-ciphertext")), 34);
 const FIRST_PAYMENT_NOTES = toHex(concat(CIPHERTEXT, TEST_NOTE, TEST_NOTE));
 
-// The ten statement values the settlement calldata carries, in the order the proof binds them,
-// and each one's word there: the selector, then protocol.SPEND_FIELDS, matched ignoring case.
-// The eleventh, the owner, is the owner signature's signer.
+// The statement values the settlement calldata carries, before the frontier's roots, in the
+// order the proof binds them, and each one's word there: the selector, then
+// protocol.SPEND_FIELDS, matched ignoring case, then the frontier's roots. The owner, which the
+// proof binds after the authorizer, is the owner signature's signer, so it has no word here.
 const STATEMENT =
-  "nf1 nf2 out-cm1 out-cm2 root domain public-amount fee recipient authorizer".split(" ");
+  "nf1 nf2 out-cm1 out-cm2 domain public-amount fee recipient authorizer packed-ranks depth".split(
+    " ",
+  );
 const settleWord = (value: string) =>
   4 + 32 * protocol.SPEND_FIELDS.findIndex((f) => f.toLowerCase() === value.replace("-", ""));
+const frontierWord = (i: number) => 4 + 32 * (protocol.SPEND_FIELDS.length + i);
 
 type Entry = Record<string, unknown>;
-/** Storage slots in insertion order: a plain object would move "21" ahead of hashed keys. */
+/** Storage slots in insertion order: a plain object would move "47" ahead of hashed keys. */
 type Slots = Map<string, string>;
 type Pair = [slot: string, value: bigint | number];
 type Step = { raw?: string; storage?: Record<string, Slots>; [key: string]: unknown };
@@ -91,8 +95,11 @@ type Mutation = (frames: Frame[]) => void;
 /** An entry's integer field, which spendEntry writes as 0x hex or decimal digits. */
 const int = (entry: Entry, key: string) => BigInt(String(entry[key]));
 
-// Pool storage: slots 0 to 20 hold filledSubtrees, 21 nextIndex, 22 the root, 23 a mapping of
-// withdrawal credit by recipient, 24 the epoch and 25 a mapping of final roots by epoch.
+// Pool storage: slot 0 holds the root, 1 a mapping of withdrawal credit by recipient, 2 the
+// epoch, 3 a mapping of final roots by epoch, and 4 to 90 the epoch's MMR (LibSkewMmr.State):
+// roots from 4, the packed ranks at 46, depth and count at 47, maxDepth at 48 and chains from 49.
+const [ROOT_SLOT, EPOCH_SLOT, RANKS_SLOT, DEPTH_COUNT_SLOT] = ["0", "2", "46", "47"];
+const [CREDITS, FINAL_ROOTS, MMR_ROOTS, MMR_CHAINS] = [1n, 3n, 4n, 49n];
 function update(slots: Slots, ...pairs: Pair[]): Slots {
   for (const [slot, value] of pairs) slots.set(slot, String(value));
   return slots;
@@ -101,23 +108,45 @@ const slots = (...pairs: Pair[]) => update(new Map(), ...pairs);
 const atPool = <T>(value: T) => ({ [addr(POOL)]: value });
 /** keccak(word(key) || word(slot)): a Solidity mapping's storage key. */
 const mapping = (key: bigint, slot: bigint) => toHex(keccak(concat(word(key), word(slot))));
-const finalRoot = (root: bigint): Pair => [mapping(0n, 25n), root];
+const finalRoot = (root: bigint): Pair => [mapping(0n, FINAL_ROOTS), root];
 /** The EIP-8250 nonce manager's slot for one of a spend's nullifier keys, by its entry field. */
 const keySlot = (entry: Entry, key: string) => toHex(protocol.nonceKeySlot(POOL, int(entry, key)));
 /** The slots of a spend's two nullifier keys, 1 once consumed. */
 const keySlots = (entry: Entry, nf1: bigint, nf2 = nf1) =>
   slots([keySlot(entry, "nf1"), nf1], [keySlot(entry, "nf2"), nf2]);
-const levels = (value: (level: number) => bigint) =>
-  slots(...Array.from({ length: protocol.DEPTH + 1 }, (_, l): Pair => [String(l), value(l)]));
-const zeroLevels = () => levels(() => 0n);
+/** The words an append changes: the root, the packed ranks, and depth with count. */
+function mmrWords(tree: MerkleTree): Pair[] {
+  const { roots, ranks, count } = tree.frontier();
+  const depthCount = BigInt(roots.length) | (count << 8n);
+  return [
+    [ROOT_SLOT, tree.root()],
+    [RANKS_SLOT, protocol.packRanks(ranks)],
+    [DEPTH_COUNT_SLOT, depthCount],
+  ];
+}
+/**
+ * The pool's whole MMR as LibSkewMmr holds `tree`: mmrWords, each root, and each chain folding
+ * the roots up to it, which the next append extends. Roots and chains above the depth are zero,
+ * as in a pool whose epochs never reached them.
+ */
+function mmrSlots(tree: MerkleTree): Pair[] {
+  const { roots } = tree.frontier();
+  const pairs = mmrWords(tree);
+  let chain = 0n;
+  for (let i = 0; i < protocol.MAX_TREES; i++) {
+    if (i < roots.length) chain = toBigint(keccak(concat(word(chain), word(roots[i]))));
+    const at = (base: bigint) => String(base + BigInt(i));
+    pairs.push([at(MMR_ROOTS), roots[i] ?? 0n], [at(MMR_CHAINS), i < roots.length ? chain : 0n]);
+  }
+  return pairs;
+}
 const synthetic = (seed: Slots, balance?: bigint): Step => ({
   synthetic_storage: atPool(seed),
   ...(balance === undefined ? {} : { synthetic_balances: atPool(String(balance)) }),
 });
-/** The pool after `count` identical one-ether deposits: filledSubtrees, nextIndex, root, balance. */
+/** The pool after the tree's identical one-ether deposits: its MMR and balance. */
 function seeded(tree: RepeatedTree): Step {
-  const filled = levels((l) => (tree.count >= 1n << BigInt(l) ? tree.uniform[l] : 0n));
-  return synthetic(update(filled, ["21", tree.count], ["22", tree.root()]), tree.count * ETH);
+  return synthetic(slots(...mmrSlots(tree)), tree.frontier().count * ETH);
 }
 function treeOf(...cms: bigint[]): Tree {
   const tree = new Tree();
@@ -279,10 +308,9 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   };
 
   const constructors = [
-    artifact("PoseidonT3", true),
     artifact("PoseidonT4", true),
     artifact("Groth16Verifier"),
-    concat(artifact("ShieldedPoolLogic"), word(A.poseidon3), word(A.poseidon4)),
+    concat(artifact("ShieldedPoolLogic"), word(A.poseidon4)),
     initcode(A.logic, A.verifier),
   ];
   const setup = constructors.map((code, i) =>
@@ -305,16 +333,16 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     const shield = shieldCalldata(hex32(n.inner), { note: toHex(TEST_NOTE) });
     return save(name, ordinary(nonce, POOL, shield, n.value), {
       slot_number: slot,
-      storage: atPool(slots(["21", tree.leaves.length], ["22", tree.root()])),
+      storage: atPool(slots(...mmrWords(tree))),
       balance_delta_before_gas: atPool(String(n.value)),
     });
   };
   const publish = (name: string, nonce: bigint, epoch = 0n, slot = SLOT): Step =>
     save(name, ordinary(nonce, POOL, protocol.encodePublish(epoch)), { slot_number: slot });
 
-  setup.push(deposit("deposit-a", NA, 5n, treeOf(NA.cm)), deposit("deposit-b", NB, 6n, BASE));
-  setup.push(publish("publish-initial", 7n));
-  const NEXT = 8n;
+  setup.push(deposit("deposit-a", NA, 4n, treeOf(NA.cm)), deposit("deposit-b", NB, 5n, BASE));
+  setup.push(publish("publish-initial", 6n));
+  const NEXT = 7n;
   const entries: Record<string, Entry> = {};
   const sha256 = (path: string) => createHash("sha256").update(readFileSync(path)).digest("hex");
   const ARTIFACT_HASHES = sha256(ZKEY) + sha256(WASM);
@@ -368,7 +396,9 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
       const [nf1, nf2] = protocol.inputNullifiers(domain, owner.root, inputs);
       const [outCm1, outCm2] = protocol.outputCommitments(outputs);
       const values = { publicAmount, fee: FEE, recipient, authorizer, owner: owner.address };
-      stmt = protocol.statement({ nf1, nf2, outCm1, outCm2, root: tree.root(), domain, ...values });
+      const { packedRanks, depth, frontier } = protocol.frontierFields(tree.frontier());
+      const mmr = { packedRanks, depth, frontier };
+      stmt = protocol.statement({ nf1, nf2, outCm1, outCm2, domain, ...values, ...mmr });
       const words = stmt.map((x, j) => (j === alias ? x + P : x));
       witness.alpha = String(toBigint(keccak(concat(...words.map(word)))) % P);
     }
@@ -391,7 +421,7 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   /** A spend step and what the harness expects of it: rejected, or its statuses and storage. */
   function spend(name: string, entry: Entry, o: SpendOptions = {}): Step {
     const amount = int(entry, "public_amount");
-    const credit = slots([mapping(int(entry, "recipient"), 23n), o.failedClaim ? amount : 0n]);
+    const credit = slots([mapping(int(entry, "recipient"), CREDITS), o.failedClaim ? amount : 0n]);
     for (const [slot, value] of o.pool ?? []) credit.set(slot, value);
     const keys = o.keys ?? keySlots(entry, o.rejected ? 0n : 1n);
     const storage = { [addr(protocol.NONCE_MANAGER_ADDRESS)]: keys, ...atPool(credit) };
@@ -417,31 +447,40 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   const addCase = (name: string, transactions: Step[], setup?: Step[]) =>
     void cases.push(setup ? { name, transactions, setup } : { name, transactions });
 
-  // Two identical deposits are independently funded and independently withdrawn.
+  // Two identical deposits share a nullifier, so only one of them can be withdrawn.
   const dupTree = treeOf(NA.cm, NB.cm, NA.cm);
   const dup0 = await proveSpend("deposit-copy-first", dupTree, NA, 0n, { rootSlot: 101n });
   const dup2 = await proveSpend("deposit-copy-second", dupTree, NA, 2n, { rootSlot: 101n });
-  assert(dup0.nf1 !== dup2.nf1, "duplicate deposits share a nullifier");
-  addCase("identical-funded-deposits-both-withdrawn", [
+  assert(dup0.nf1 === dup2.nf1, "duplicate deposits have two nullifiers");
+  addCase("identical-funded-deposits-withdrawn-once", [
     deposit("deposit-a-again", NA, NEXT, dupTree, 101n),
     publish("publish-duplicates", NEXT + 1n, 0n, 101n),
     spend("withdraw-first-deposit", dup0, { slot: 102n, paid: ETH - FEE }),
-    spend("withdraw-second-deposit", dup2, { slot: 103n, paid: 2n * (ETH - FEE) }),
+    spend("withdraw-second-deposit", dup2, {
+      slot: 103n,
+      rejected: true,
+      keys: keySlots(dup2, 1n, 0n),
+    }),
   ]);
 
-  // Private settlement may create a commitment that already exists; both survive.
+  // Private settlement may create a commitment that already exists. Settlement appends it, and
+  // the two share a nullifier.
   const copyOutputs: protocol.Output[] = [[NB.inner, NB.value], protocol.sinkOutputs()[1]];
   const duplicate = await proveSpend("private-duplicate", BASE, NA, 0n, { outputs: copyOutputs });
   const privateTree = treeOf(NA.cm, NB.cm, NB.cm);
   const b1 = await proveSpend("private-copy-original", privateTree, NB, 1n, { rootSlot: 102n });
   const b2 = await proveSpend("private-copy-new", privateTree, NB, 2n, { rootSlot: 102n });
-  assert(b1.nf1 !== b2.nf1, "duplicate outputs share a nullifier");
-  const transfer = { pool: slots(["21", 3], ["22", privateTree.root()]) };
-  addCase("private-duplicate-output-both-withdrawn", [
+  assert(b1.nf1 === b2.nf1, "duplicate outputs have two nullifiers");
+  const transfer = { pool: slots(...mmrWords(privateTree)) };
+  addCase("private-duplicate-output-withdrawn-once", [
     spend("create-private-copy", duplicate, transfer),
     publish("publish-private-copy", NEXT, 0n, 102n),
     spend("withdraw-original-private", b1, { slot: 103n, paid: NB.value - FEE }),
-    spend("withdraw-created-private", b2, { slot: 104n, paid: 2n * (NB.value - FEE) }),
+    spend("withdraw-created-private", b2, {
+      slot: 104n,
+      rejected: true,
+      keys: keySlots(b2, 1n, 0n),
+    }),
   ]);
 
   // Different roots/slots do not turn the same occurrence into a new spend.
@@ -485,8 +524,16 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   const branchB = treeOf(NA.cm, NB.cm, ND.cm, NC.cm);
   const old = await proveSpend("reorg-old-branch", branchA, NC, 2n, { rootSlot: 101n });
   const rebuilt = await proveSpend("reorg-new-branch", branchB, NC, 3n, { rootSlot: 101n });
-  assert(old.nf1 !== rebuilt.nf1, "reordered deposits share a nullifier");
-  const atBranchRoot = { ...old, root: rebuilt.root };
+  assert(old.nf1 === rebuilt.nf1, "reordered deposits have two nullifiers");
+  // The current root and frontier, which the dispatcher accepts, so the proof check refuses it.
+  const frontierOf = ({ root, count, packed_ranks, depth, frontier }: Entry) => ({
+    root,
+    count,
+    packed_ranks,
+    depth,
+    frontier,
+  });
+  const atBranchRoot = { ...old, ...frontierOf(rebuilt) };
   addCase("reorg-reordered-deposits-rebuild-proof", [
     { checkpoint: "before-branches" },
     deposit("branch-a-c", NC, NEXT, treeOf(NA.cm, NB.cm, NC.cm), 101n),
@@ -509,14 +556,19 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   const [OUT1, OUT2] = [eth(60n), eth(35n)].map(note);
   const outputs = [OUT1, OUT2].map((n): protocol.Output => [n.inner, n.value]);
   const newCredit: protocol.Output[] = [outputs[0], [OUT2.inner, eth(30n)]];
-  const carry = (1n << 19n) - 1n;
+  // An append hashes at most once. With trees of ranks 18 down to 2, then 1 and 1, both outputs
+  // merge: the most hashing a settlement does. With trees of ranks 18 down to 1, both outputs
+  // start a tree at a depth no epoch has reached, so each writes a new root and chain; with a
+  // retained credit, that is the five new storage slots check-gas-profile.ts bounds.
+  const merges = (1n << 20n) - 19n;
+  const pushes = (1n << 20n) - 22n;
   const rollover = TREE_CAPACITY - 1n;
   const gasCases: [string, bigint, protocol.Output[]][] = [
-    ["long-carry", carry, outputs],
-    ["long-carry-even", carry - 1n, outputs],
-    ["long-carry-new-credit", carry, newCredit],
-    ["long-carry-retained-credit", carry, newCredit],
-    ["long-carry-one-output-new-credit", carry, [outputs[0], protocol.sinkOutputs()[1]]],
+    ["two-merges", merges, outputs],
+    ["two-merges-new-credit", merges, newCredit],
+    ["two-merges-retained-credit", merges, newCredit],
+    ["two-merges-one-output-new-credit", merges, [outputs[0], protocol.sinkOutputs()[1]]],
+    ["two-new-trees-retained-credit", pushes, newCredit],
     ["rollover", rollover, outputs],
     ["rollover-new-credit", rollover, newCredit],
     ["rollover-retained-credit", rollover, newCredit],
@@ -536,8 +588,8 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     const next = treeOf(...added);
     const changed =
       filled > TREE_CAPACITY
-        ? slots(["21", added.length], ["22", next.root()], ["24", 1], finalRoot(large.root()))
-        : slots(["21", filled], ["22", new RepeatedTree(NA.cm, count, added).root()], ["24", 0]);
+        ? slots(...mmrWords(next), [EPOCH_SLOT, 1], finalRoot(large.root()))
+        : slots(...mmrWords(new RepeatedTree(NA.cm, count, added)), [EPOCH_SLOT, 0]);
     const steps = [
       seeded(large),
       publish(`publish-${label}`, NEXT, 0n, 101n),
@@ -556,66 +608,48 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     addCase(`synthetic-reachable-${label}`, steps);
   }
 
-  // Reproduce the former cap with the sole dispatcher literal (PUSH3 limit) changed back. It is
-  // an expected failing settlement, not a relaxed assertion for the fix.
+  // A settlement limit below what settlement needs, pinned by a dispatcher with the sole
+  // settlement gas literal (PUSH3 limit) changed: approval consumes the keys, then settlement
+  // runs out. It is an expected failing settlement, which is why the pin covers the heaviest one.
+  const LOW_LIMIT = 100_000n;
   const pin = (limit: bigint) => concat(Uint8Array.of(0x62), toBytes(limit, 3));
-  const oldDispatcher = Buffer.from(constructors[4]);
-  const at = oldDispatcher.indexOf(pin(gas.SETTLE_FRAME_GAS));
-  const once = at >= 0 && oldDispatcher.indexOf(pin(gas.SETTLE_FRAME_GAS), at + 1) < 0;
+  const lowDispatcher = Buffer.from(constructors[3]);
+  const at = lowDispatcher.indexOf(pin(gas.SETTLE_FRAME_GAS));
+  const once = at >= 0 && lowDispatcher.indexOf(pin(gas.SETTLE_FRAME_GAS), at + 1) < 0;
   assert(once, "the dispatcher initcode must hold the settlement gas pin once");
-  oldDispatcher.set(pin(1_400_000n), at);
-  const oldSetup = setup.with(4, save("deploy-pool-old-limit", ordinary(4n, null, oldDispatcher)));
-  const oldEntry = entries["long-carry"];
-  const oldBoundary = new RepeatedTree(NA.cm, carry);
-  const oldSettlement = rawTx(frameTx(oldEntry, { mutate: set(2, { gasLimit: 1_400_000n }) }));
-  const oldSteps = [
-    seeded(oldBoundary),
-    publish("publish-old-limit", NEXT, 0n, 101n),
-    save("old-limit-settlement-failure", oldSettlement, {
+  lowDispatcher.set(pin(LOW_LIMIT), at);
+  const lowSetup = setup.with(3, save("deploy-pool-low-limit", ordinary(3n, null, lowDispatcher)));
+  const lowEntry = entries["two-merges"];
+  const lowBoundary = new RepeatedTree(NA.cm, merges);
+  const lowSettlement = rawTx(frameTx(lowEntry, { mutate: set(2, { gasLimit: LOW_LIMIT }) }));
+  const lowSteps = [
+    seeded(lowBoundary),
+    publish("publish-low-limit", NEXT, 0n, 101n),
+    save("low-limit-settlement-failure", lowSettlement, {
       slot_number: 102n,
       statuses: [1, 1, 0],
       payer: addr(POOL),
       balance_delta_before_gas: atPool("0"),
       storage: {
-        [addr(protocol.NONCE_MANAGER_ADDRESS)]: keySlots(oldEntry, 1n),
-        ...atPool(slots(["21", carry], ["22", oldBoundary.root()])),
+        [addr(protocol.NONCE_MANAGER_ADDRESS)]: keySlots(lowEntry, 1n),
+        ...atPool(slots(...mmrWords(lowBoundary))),
       },
     }),
   ];
-  addCase("old-1_4m-limit-consumes-keys-before-settlement-failure", oldSteps, oldSetup);
+  addCase("low-limit-consumes-keys-before-settlement-failure", lowSteps, lowSetup);
 
-  // An input from a closed epoch can create the first outputs in a fresh epoch. This exposes
-  // four fresh storage writes when the recipient leaves credit.
-  const fresh = { outputs: newCredit, rootSlot: 101n, recipient: REJECTOR };
-  const freshEntry = await proveSpend("fresh-epoch-old-input", BASE, NA, 0n, fresh);
+  // The rollover cases above create the first outputs of a fresh epoch from a closed epoch's
+  // input. An MMR emptied by a rollover takes its first notes in the same transaction, and a
+  // full epoch has reached every depth, so no settlement starts on an MMR with fresh slots below
+  // the depth it reaches: two-new-trees-retained-credit is the five new slots bound.
   const baseFinal = finalRoot(BASE.root());
-  const freshTree = treeOf(int(freshEntry, "out_cm1"), int(freshEntry, "out_cm2"));
-  const freshSlots = slots(["21", 2], ["22", freshTree.root()], ["24", 1]);
-  const freshSpend = { slot: 102n, failedClaim: true, pool: freshSlots };
-  const freshPost = spend("fresh-epoch-retained-credit", freshEntry, freshSpend);
-  const emptyEpoch = update(zeroLevels(), ["21", 0], ["22", protocol.EMPTY_ROOT], ["24", 1]);
-  addCase("synthetic-storage-upper-bound-empty-epoch-and-credit", [
-    synthetic(update(emptyEpoch, baseFinal)),
-    publish("publish-closed-epoch", NEXT, 0n, 101n),
-    freshPost,
-  ]);
-
-  // Conservative five-slot state-gas bound: zero frontier hashes are injected. This does not
-  // claim that such a full-tree frontier was produced by deposits.
-  const zeroPost = structuredClone(freshPost);
-  update(zeroPost.storage![addr(POOL)], baseFinal);
-  addCase("synthetic-storage-upper-bound-five-new-slots", [
-    synthetic(update(zeroLevels(), ["21", TREE_CAPACITY], ["22", BASE.root()])),
-    publish("publish-zero-frontier", NEXT, 0n, 101n),
-    zeroPost,
-  ]);
 
   // Same tree contents at a different authenticated epoch require a new proof and a different
   // nullifier, even when the occurrence index is identical.
   const epoch1 = await proveSpend("epoch-one-a", BASE, NA, 0n, { epoch: 1n, rootSlot: 101n });
   const rebound = { ...initial, epoch: "1", root_slot: "101", domain: epoch1.domain };
   addCase("authenticated-epoch-proof-binding", [
-    synthetic(slots(["24", 1], baseFinal), 4n * ETH),
+    synthetic(slots([EPOCH_SLOT, 1], baseFinal), 4n * ETH),
     publish("publish-epoch-one", NEXT, 1n, 101n),
     spend("old-proof-rebound-epoch", rebound, { slot: 102n, rejected: true }),
     spend("epoch-one-proof", epoch1, { slot: 102n, ...paidA }),
@@ -702,16 +736,16 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     addCase(`validation-limit-raised-beyond-fee-${label}`, [step]);
   }
 
-  // Hybrid compression: the proof binds the ten statement values in the settlement calldata
-  // through alpha and gamma, which the pool recomputes, and through beta, which follows the
-  // proof in frame 1, so changing any one of them fails the pool's VERIFY frame. The owner signs
-  // each changed intent again, so only the proof check can refuse it. nf1 and nf2 change in the
-  // entry so the EIP-8250 keys follow, and the authorizer case re-signs the proof with an
-  // attacker's key, so all three reach the proof check. root and domain are refused earlier by
-  // exact checks (old-branch-proof-current-root-rejected and old-proof-rebound-epoch take changed
-  // ones to the verifier). The eleventh value, the owner, is the owner signature's signer, which
-  // owner-signature-by-a-key-outside-the-set changes. The dispatcher and the verifier both refuse
-  // a beta outside the field.
+  // Hybrid compression: the proof binds the statement values through alpha and gamma, which the
+  // pool recomputes from the settlement calldata, and through beta, which follows the proof in
+  // frame 1, so changing any one of them fails the pool's VERIFY frame. The owner signs each
+  // changed intent again, so only the proof check can refuse it. nf1 and nf2 change in the entry
+  // so the EIP-8250 keys follow, and the authorizer case re-signs the proof with an attacker's
+  // key, so all three reach the proof check. The domain and the frontier (packed ranks, depth
+  // and roots) are refused earlier by exact checks (old-branch-proof-current-root-rejected and
+  // old-proof-rebound-epoch take changed ones to the verifier). The owner is the owner
+  // signature's signer, which owner-signature-by-a-key-outside-the-set changes. The dispatcher
+  // and the verifier both refuse a beta outside the field.
   const stolen: Entry = { ...initial, authorizer: addr(addressOf(ATTACKER)) };
   stolen.authorizer_private_key = toHex(ATTACKER);
   const resign = { owners: resigned };
@@ -730,6 +764,8 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
           : refused(name, initial, bumpWord(2, settleWord(value)), resign);
     addCase(`compression-statement-${value}-changed-rejected`, [step]);
   }
+  const rootStep = refused("changed-frontier-root", initial, bumpWord(2, frontierWord(0)));
+  addCase("compression-statement-frontier-root-changed-rejected", [rootStep]);
   const betaStep = refused("changed-beta", initial, bumpWord(1, 256));
   addCase("compression-beta-changed-rejected", [betaStep]);
   const outside = refused("beta-outside-field", initial, bumpWord(1, 256, P));
@@ -772,7 +808,7 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   const rolled = new RepeatedTree(NA.cm, rollover);
   const rolledState = seeded(rolled);
   const rolledRoot = finalRoot(rolled.root());
-  const epochOne = slots(["21", 2], ["22", rolledOutputs.root()], ["24", 1], rolledRoot);
+  const epochOne = slots(...mmrWords(rolledOutputs), [EPOCH_SLOT, 1], rolledRoot);
   const rolledSpend = { slot: 102n, ...tailRuns, pool: epochOne };
   const rolledTransfer = (name: string, epoch: bigint) =>
     spend(name, entries.rollover, { ...rolledSpend, mutate: publishTail(epoch) });
@@ -798,10 +834,10 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   // case proves an honest withdrawal against alpha over one value plus P, with the nonce keys
   // following, and the owner signs the aliased intent, as an owner who wanted the pool to pay
   // for a settlement bound to revert could, so only the range check can refuse it before
-  // approval. root, domain and the authorizer are pinned by exact checks instead, and the owner
-  // is a signer's address. entries.json holds the changed entries.
+  // approval. The domain, the authorizer and the frontier are pinned by exact checks instead,
+  // and the owner is a signer's address. entries.json holds the changed entries.
   for (const [alias, value] of STATEMENT.entries()) {
-    if (["root", "domain", "authorizer"].includes(value)) continue;
+    if (["domain", "authorizer", "packed-ranks", "depth"].includes(value)) continue;
     const aliased = await proveSpend(`alias-${value}`, BASE, NA, 0n, { alias });
     // The recipient moves in the settlement calldata; the other values move in the entry, so
     // the settlement and, for nf1 and nf2, the nonce keys carry them.
@@ -813,6 +849,18 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     const mutate = value === "recipient" ? bumpWord(2, settleWord(value), P) : undefined;
     const step = refused(`aliased-${value}`, aliased, mutate, resign);
     addCase(`compression-${value}-aliased-by-p-rejected`, [step]);
+  }
+
+  // The frontier must open the root the recent-root frame names (LibSkewMmrVerifier), with no
+  // root above its depth and no depth above MAX_TREES, or a spend could prove membership in a
+  // frontier the pool never held under a root it did.
+  const depth = Number(int(initial, "depth"));
+  for (const [label, mutate] of [
+    ["changed-count", bumpWord(2, settleWord("count"))],
+    ["nonzero-root-above-depth", bumpWord(2, frontierWord(depth))],
+    ["depth-above-max-trees", bumpWord(2, settleWord("depth"), BigInt(protocol.MAX_TREES))],
+  ] as const) {
+    addCase(`frontier-${label}-rejected`, [refused(`frontier-${label}`, initial, mutate)]);
   }
 
   // These dispatcher checks stop theft, a burn or a gas drain, yet every case above passed with

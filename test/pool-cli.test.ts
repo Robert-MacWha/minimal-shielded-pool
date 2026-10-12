@@ -128,8 +128,8 @@ function silentNode(): PoolNode & { calls: string[] } {
 
 const noKey = async (): Promise<Uint8Array> => assert.fail("the funded key was read");
 
-test("this tree spends owner-set-v1, with the recorded deployment's formulas", () => {
-  assert.equal(POOL_PROFILE, "owner-set-v1");
+test("this tree spends skew-mmr-v1, with the recorded deployment's formulas", () => {
+  assert.equal(POOL_PROFILE, "skew-mmr-v1");
   // Until this profile is deployed the record names the previous one, which the spend CLI
   // refuses. Both profiles share the formulas checked here.
   assert.ok([POOL_PROFILE, PREVIOUS_POOL_PROFILE].includes(DEPLOYED.profile as string));

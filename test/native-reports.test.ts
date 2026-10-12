@@ -40,7 +40,7 @@ function step(report: Report, raw: string): [Report, string] {
   return [report.cases[0].steps[j], `cases[0].steps[${j}]`];
 }
 // A deployment, the same bytes on every run, and a withdrawal, which carries a proof.
-const DEPLOYMENT = "deploy-poseidon3.hex";
+const DEPLOYMENT = "deploy-poseidon4.hex";
 const WITHDRAWAL = "withdraw-first-deposit.hex";
 const [, DEPLOYED] = step(COMMITTED.native, DEPLOYMENT);
 const [withdrawal, WITHDRAWN] = step(COMMITTED.native, WITHDRAWAL);

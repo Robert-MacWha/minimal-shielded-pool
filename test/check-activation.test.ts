@@ -114,7 +114,7 @@ describe("malformed or self-certified manifests", () => {
     profile("verify_frame_gas", 225001),
     profile("pool_profile", "position-notes-v2"),
     ["string verify_frame_gas", set("verify_frame_gas", "225000"), "verify_frame_gas does not"],
-    ["the previous wire_profile", set("wire_profile", "position-notes-v2"), "wire profile"],
+    ["the previous wire_profile", set("wire_profile", "position-notes-v3"), "wire profile"],
     // The budget is the recent root, VERIFY and signature gas: 8000 + 225000 + 2800 = 235800.
     ["a verify budget one over", set("required_verify_budget", 235801), "budget is inconsistent"],
     ["a verify budget one under", set("required_verify_budget", 235799), "budget is inconsistent"],

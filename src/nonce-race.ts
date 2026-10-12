@@ -88,7 +88,7 @@ export async function seededTree(call: Call, pool: string, expectedEpoch: bigint
   if (rebuilt !== onchain) {
     throw new GeneratorError(
       `tree reconstruction mismatch: rebuilt ${rebuilt} != on-chain ${onchain}; the pool's ` +
-        "leaf set changed or DEPTH/hash params differ",
+        "leaf set changed or MAX_TREES/hash params differ",
     );
   }
   return tree;

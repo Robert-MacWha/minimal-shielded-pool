@@ -18,38 +18,46 @@ pragma circom 2.0.8;
 //     owner_pk = Poseidon(1, Q, nk)
 //     inner    = Poseidon(owner_pk, rho)     what a recipient gives a sender
 //     cm       = Poseidon(2, inner, value)   shield hashes msg.value in on chain
-//     index    = sum(bits[i] * 2^i)          the note's leaf in its epoch's tree
-//     nf       = Poseidon(4, Poseidon(domain, nk), Poseidon(cm, index))
-// The spender proves it knows Q, each input's nk, rho, value and Merkle path
-// (siblings, and the index bits, low bit first), and the owner's path in Q.
-// The domain is keccak256(DOMAIN_TAG || chain_id || pool || epoch) mod p, and
-// the pool requires the epoch whose root the spend proves against. Each epoch
-// has its own depth-20 tree, and the pool starts the next epoch when a tree
-// lacks room. Each leaf is therefore a separate note with exactly one
-// nullifier, even when two leaves hold the same commitment. A circuit with
-// another nullifier formula needs a fresh pool: under an existing one, its
-// spent notes would get new nullifiers and could be spent again.
+//     nf       = Poseidon(4, Poseidon(domain, nk), cm)
+// The spender proves it knows Q, each input's nk, rho, value and the opening
+// of cm in the epoch's skew-MMR (@skew-mmr/circuits' SkewMmrInclusion): the
+// tree that holds it, its children and the path from it to that tree's root,
+// and the owner's path in Q. The domain is
+// keccak256(DOMAIN_TAG || chain_id || pool || epoch) mod p, and the pool
+// requires the epoch whose frontier the spend proves against. Each epoch has
+// its own MMR of at most MAX_TREES trees, and the pool starts the next epoch
+// when it lacks room. A commitment has one nullifier per epoch, so two
+// insertions of the same commitment in an epoch can be spent only once
+// between them. A fresh rho for each note keeps commitments distinct. A
+// circuit with another nullifier formula needs a fresh pool: under an existing
+// one, its spent notes would get new nullifiers and could be spent again.
 //
-// Statement. Eleven values, in this order:
-//     [nf1, nf2, out_cm1, out_cm2, root, domain, public_amount, fee,
-//      recipient, authorizer, owner]
-// They are private signals here. The first ten are public in the settlement
-// calldata, and the pool reads owner from the owner's signature entry. Hybrid
-// compression (eprint 2025/1500) exposes three public signals instead of
-// eleven, which saves the verifier eight scalar multiplications:
-//     alpha = keccak256(the eleven values as 32-byte words) mod p, computed
-//             by the pool and passed in as the one public input;
-//     beta  = Poseidon(the eleven values), an output;
-//     gamma = x[0] + x[1]*s + ... + x[10]*s^10 at s = alpha + beta, an output
-//             that the pool recomputes from its own copy of the values.
+// Statement. 12 + MAX_TREES values, in this order:
+//     [nf1, nf2, out_cm1, out_cm2, domain, public_amount, fee, recipient,
+//      authorizer, owner, packed_ranks, depth, roots[0], ...,
+//      roots[MAX_TREES - 1]]
+// roots, packed_ranks and depth are the MMR's frontier as LibSkewMmr holds it,
+// with roots above depth zero. The pool publishes a keccak commitment to the
+// frontier rather than the frontier itself, and the dispatcher checks the
+// frontier against it. The values are private signals here. All but the owner
+// are public in the settlement calldata, and the pool reads owner from the
+// owner's signature entry. Hybrid compression (eprint 2025/1500) exposes three
+// public signals instead of all of them, which saves the verifier a scalar
+// multiplication per value:
+//     alpha = keccak256(the values as 32-byte words) mod p, computed by the
+//             pool and passed in as the one public input;
+//     beta  = the values chained into Poseidon(2), from zero (see
+//             StatementDigest), an output;
+//     gamma = x[0] + x[1]*s + ... + x[n-1]*s^(n-1) at s = alpha + beta, an
+//             output that the pool recomputes from its own copy of the values.
 // circom puts outputs first, so the verifier's order is [beta, gamma, alpha].
-// The verifier never sees the eleven values, so the pool range-checks each one
-// itself (see verifyProof in the dispatcher). The client (src/protocol.ts),
-// the dispatcher and this circuit must agree on the order and encoding of the
+// The verifier never sees the values, so the pool range-checks each one itself
+// (see verifyProof in the dispatcher). The client (src/protocol.ts), the
+// dispatcher and this circuit must agree on the order and encoding of the
 // values, and a mismatch shows up only as an invalid proof.
 //
 // The rules, beyond each nullifier following from its note:
-//   - Both inputs share Q. An input with value must open at root. A
+//   - Both inputs share Q. An input with value must open in the frontier. A
 //     zero-value input is not checked, so a single note can be spent beside a
 //     fabricated dummy, which adds no value.
 //   - The owner is a nonzero leaf of Q. Unused leaves are 0, which no
@@ -60,8 +68,8 @@ pragma circom 2.0.8;
 //     repeated nonce key too, as defense in depth.
 //   - A zero-value output k must use inner k + 1, which makes its commitment
 //     Poseidon(2, k + 1, 0), ShieldedPoolLogic's SINK_k. Settlement does not
-//     insert sinks, so a spend can leave an output empty without using tree
-//     capacity, and a full tree never blocks a full withdrawal. A positive
+//     insert sinks, so a spend can leave an output empty without using MMR
+//     capacity, and a full MMR never blocks a full withdrawal. A positive
 //     output may use neither sink inner, so sink inners only ever carry zero.
 //   - out_cm1 != out_cm2. Settlement refuses two equal outputs, and a sink
 //     in the other position. The dispatcher checks neither before approving,
@@ -91,10 +99,11 @@ pragma circom 2.0.8;
 // into spend.wasm, which check-artifacts in the justfile rebuilds and compares
 // byte for byte with core/artifacts/.
 
-// circomlib, found through circom2's -l node_modules.
+// circomlib and @skew-mmr/circuits, found through circom2's -l node_modules.
 include "circomlib/circuits/poseidon.circom";
 include "circomlib/circuits/bitify.circom";
 include "circomlib/circuits/comparators.circom";
+include "@skew-mmr/circuits/inclusion.circom";
 
 // The root of a depth-DEPTH Poseidon tree from a leaf and its path: each height's
 // sibling and the leaf index's bit there, low bit first. The bits must be 0 or 1:
@@ -123,22 +132,25 @@ template MerkleRoot(DEPTH) {
     root <== cur[DEPTH];
 }
 
-// One input note: its nullifier, and its membership at root when it has value.
-template InputNote(DEPTH) {
-    signal input root;
+// One input note: its nullifier, and its opening in the frontier when it has value.
+template InputNote(MAX_TREES) {
+    var MAX_RANK = MAX_TREES - 1;
+
+    signal input roots[MAX_TREES];
+    signal input packed_ranks;
+    signal input depth;
     signal input domain;
     signal input owner_root;
     signal input nk;
     signal input rho;
     signal input value;
-    signal input siblings[DEPTH];
-    signal input bits[DEPTH];
+    signal input tree;
+    signal input children[2];
+    signal input path_len;
+    signal input path_elements[MAX_RANK];
+    signal input path_siblings[MAX_RANK];
+    signal input path_right[MAX_RANK];
     signal output nf;
-
-    var index = 0;
-    for (var i = 0; i < DEPTH; i++) {
-        index += bits[i] * (2 ** i);
-    }
 
     component pk = Poseidon(3);
     pk.inputs[0] <== 1;
@@ -152,33 +164,43 @@ template InputNote(DEPTH) {
     leaf.inputs[1] <== inner.out;
     leaf.inputs[2] <== value;
 
-    component path = MerkleRoot(DEPTH);
-    path.leaf <== leaf.out;
-    for (var i = 0; i < DEPTH; i++) {
-        path.siblings[i] <== siblings[i];
-        path.bits[i] <== bits[i];
+    component member = SkewMmrInclusion(MAX_TREES);
+    for (var i = 0; i < MAX_TREES; i++) {
+        member.roots[i] <== roots[i];
+    }
+    member.packedRanks <== packed_ranks;
+    member.depth <== depth;
+    member.element <== leaf.out;
+    member.tree <== tree;
+    member.children[0] <== children[0];
+    member.children[1] <== children[1];
+    member.pathLen <== path_len;
+    for (var i = 0; i < MAX_RANK; i++) {
+        member.pathElements[i] <== path_elements[i];
+        member.pathSiblings[i] <== path_siblings[i];
+        member.pathRight[i] <== path_right[i];
     }
     // Membership only for a note with value: a zero-value input may be a dummy.
-    (path.root - root) * value === 0;
+    (1 - member.valid) * value === 0;
 
-    // The domain carries the input's epoch and the index its leaf, so each funded
-    // leaf has one nullifier. cm stays in so that a zero-value dummy, whose path is
-    // not checked, cannot copy a funded note's nullifier with its key and index.
+    // The domain carries the input's epoch. cm carries the value, so a zero-value dummy,
+    // whose membership is not checked, cannot copy a funded note's nullifier with its key.
     component domainKey = Poseidon(2);
     domainKey.inputs[0] <== domain;
     domainKey.inputs[1] <== nk;
-    component occurrence = Poseidon(2);
-    occurrence.inputs[0] <== leaf.out;
-    occurrence.inputs[1] <== index;
     component null = Poseidon(3);
     null.inputs[0] <== 4;
     null.inputs[1] <== domainKey.out;
-    null.inputs[2] <== occurrence.out;
+    null.inputs[2] <== leaf.out;
     nf <== null.out;
 }
 
-template Spend(DEPTH, OWNER_DEPTH) {
-    signal input root;
+template Spend(MAX_TREES, OWNER_DEPTH) {
+    var MAX_RANK = MAX_TREES - 1;
+
+    signal input roots[MAX_TREES];
+    signal input packed_ranks;
+    signal input depth;
     signal input domain;
     signal input owner_root;     // Q, the owner set both inputs belong to
     signal input owner;          // the owner set's address that signs this spend
@@ -187,8 +209,12 @@ template Spend(DEPTH, OWNER_DEPTH) {
     signal input in_nk[2];
     signal input in_rho[2];
     signal input in_value[2];
-    signal input in_siblings[2][DEPTH];
-    signal input in_bits[2][DEPTH];
+    signal input in_tree[2];
+    signal input in_children[2][2];
+    signal input in_path_len[2];
+    signal input in_path_elements[2][MAX_RANK];
+    signal input in_path_siblings[2][MAX_RANK];
+    signal input in_path_right[2][MAX_RANK];
     signal input out_inner[2];   // a recipient reveals inner, never its secrets
     signal input out_value[2];
     signal input public_amount;  // credited to recipient as a withdrawal
@@ -203,16 +229,25 @@ template Spend(DEPTH, OWNER_DEPTH) {
     // inputs, both in the owner set Q
     component note[2];
     for (var k = 0; k < 2; k++) {
-        note[k] = InputNote(DEPTH);
-        note[k].root <== root;
+        note[k] = InputNote(MAX_TREES);
+        for (var i = 0; i < MAX_TREES; i++) {
+            note[k].roots[i] <== roots[i];
+        }
+        note[k].packed_ranks <== packed_ranks;
+        note[k].depth <== depth;
         note[k].domain <== domain;
         note[k].owner_root <== owner_root;
         note[k].nk <== in_nk[k];
         note[k].rho <== in_rho[k];
         note[k].value <== in_value[k];
-        for (var i = 0; i < DEPTH; i++) {
-            note[k].siblings[i] <== in_siblings[k][i];
-            note[k].bits[i] <== in_bits[k][i];
+        note[k].tree <== in_tree[k];
+        note[k].children[0] <== in_children[k][0];
+        note[k].children[1] <== in_children[k][1];
+        note[k].path_len <== in_path_len[k];
+        for (var i = 0; i < MAX_RANK; i++) {
+            note[k].path_elements[i] <== in_path_elements[k][i];
+            note[k].path_siblings[i] <== in_path_siblings[k][i];
+            note[k].path_right[i] <== in_path_right[k][i];
         }
     }
 
@@ -305,10 +340,15 @@ template Spend(DEPTH, OWNER_DEPTH) {
     sameOutput.out === 0;
 }
 
-// The spend with its eleven-value statement compressed to (beta, gamma, alpha).
-template CompressedSpend(DEPTH, OWNER_DEPTH) {
+// The spend with its statement compressed to (beta, gamma, alpha).
+template CompressedSpend(MAX_TREES, OWNER_DEPTH) {
+    var MAX_RANK = MAX_TREES - 1;
+    var N = 12 + MAX_TREES;
+
     signal input alpha;
-    signal input root;
+    signal input roots[MAX_TREES];
+    signal input packed_ranks;
+    signal input depth;
     signal input domain;
     signal input owner_root;
     signal input owner;
@@ -317,8 +357,12 @@ template CompressedSpend(DEPTH, OWNER_DEPTH) {
     signal input in_nk[2];
     signal input in_rho[2];
     signal input in_value[2];
-    signal input in_siblings[2][DEPTH];
-    signal input in_bits[2][DEPTH];
+    signal input in_tree[2];
+    signal input in_children[2][2];
+    signal input in_path_len[2];
+    signal input in_path_elements[2][MAX_RANK];
+    signal input in_path_siblings[2][MAX_RANK];
+    signal input in_path_right[2][MAX_RANK];
     signal input out_inner[2];
     signal input out_value[2];
     signal input public_amount;
@@ -328,8 +372,12 @@ template CompressedSpend(DEPTH, OWNER_DEPTH) {
     signal output beta;
     signal output gamma;
 
-    component spend = Spend(DEPTH, OWNER_DEPTH);
-    spend.root <== root;
+    component spend = Spend(MAX_TREES, OWNER_DEPTH);
+    for (var i = 0; i < MAX_TREES; i++) {
+        spend.roots[i] <== roots[i];
+    }
+    spend.packed_ranks <== packed_ranks;
+    spend.depth <== depth;
     spend.domain <== domain;
     spend.owner_root <== owner_root;
     spend.owner <== owner;
@@ -341,9 +389,14 @@ template CompressedSpend(DEPTH, OWNER_DEPTH) {
         spend.in_nk[k] <== in_nk[k];
         spend.in_rho[k] <== in_rho[k];
         spend.in_value[k] <== in_value[k];
-        for (var i = 0; i < DEPTH; i++) {
-            spend.in_siblings[k][i] <== in_siblings[k][i];
-            spend.in_bits[k][i] <== in_bits[k][i];
+        spend.in_tree[k] <== in_tree[k];
+        spend.in_children[k][0] <== in_children[k][0];
+        spend.in_children[k][1] <== in_children[k][1];
+        spend.in_path_len[k] <== in_path_len[k];
+        for (var i = 0; i < MAX_RANK; i++) {
+            spend.in_path_elements[k][i] <== in_path_elements[k][i];
+            spend.in_path_siblings[k][i] <== in_path_siblings[k][i];
+            spend.in_path_right[k][i] <== in_path_right[k][i];
         }
         spend.out_inner[k] <== out_inner[k];
         spend.out_value[k] <== out_value[k];
@@ -353,34 +406,52 @@ template CompressedSpend(DEPTH, OWNER_DEPTH) {
     spend.recipient <== recipient;
     spend.authorizer <== authorizer;
 
-    signal stmt[11];
+    signal stmt[N];
     stmt[0] <== spend.nf1;
     stmt[1] <== spend.nf2;
     stmt[2] <== spend.out_cm1;
     stmt[3] <== spend.out_cm2;
-    stmt[4] <== root;
-    stmt[5] <== domain;
-    stmt[6] <== public_amount;
-    stmt[7] <== fee;
-    stmt[8] <== recipient;
-    stmt[9] <== authorizer;
-    stmt[10] <== owner;
+    stmt[4] <== domain;
+    stmt[5] <== public_amount;
+    stmt[6] <== fee;
+    stmt[7] <== recipient;
+    stmt[8] <== authorizer;
+    stmt[9] <== owner;
+    stmt[10] <== packed_ranks;
+    stmt[11] <== depth;
+    for (var i = 0; i < MAX_TREES; i++) {
+        stmt[12 + i] <== roots[i];
+    }
 
-    component digest = Poseidon(11);
-    for (var i = 0; i < 11; i++) {
-        digest.inputs[i] <== stmt[i];
+    component digest = StatementDigest(N);
+    for (var i = 0; i < N; i++) {
+        digest.stmt[i] <== stmt[i];
     }
     beta <== digest.out;
 
     // Horner's rule, highest coefficient first.
     signal sigma;
     sigma <== alpha + beta;
-    signal acc[11];
-    acc[10] <== stmt[10];
-    for (var i = 10; i > 0; i--) {
+    signal acc[N];
+    acc[N - 1] <== stmt[N - 1];
+    for (var i = N - 1; i > 0; i--) {
         acc[i - 1] <== acc[i] * sigma + stmt[i - 1];
     }
     gamma <== acc[0];
+}
+
+// beta: the statement chained into Poseidon(2), starting from zero.
+template StatementDigest(N) {
+    signal input stmt[N];
+    signal output out;
+
+    component link[N];
+    for (var i = 0; i < N; i++) {
+        link[i] = Poseidon(2);
+        link[i].inputs[0] <== i == 0 ? 0 : link[i - 1].out;
+        link[i].inputs[1] <== stmt[i];
+    }
+    out <== link[N - 1].out;
 }
 
 component main {public [alpha]} = CompressedSpend(20, 16);

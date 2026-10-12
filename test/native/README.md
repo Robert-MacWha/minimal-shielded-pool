@@ -37,10 +37,11 @@ key is test-only. The vectors themselves are ignored by Git. The two reports,
 `native-report.json` and `policy-report.json`, are tracked, so a run changes
 them by design.
 
-The recorded run passes 86 native scenarios and two client-policy tests, using
-34 real Groth16 proofs. The highest measured settlement execution cost is
-1,435,539 gas (long carry plus withdrawal credit, with a first payment's
-notes). The conservative five-slot state test uses 489,600 state gas, below the
+The recorded run passes 89 native scenarios and two client-policy tests, using
+33 real Groth16 proofs. The highest measured settlement execution cost is
+229,284 gas (two merges plus withdrawal credit, with a first payment's notes).
+The five-new-slot state case, two outputs that each start a tree at a depth no
+epoch has reached plus a retained credit, uses 489,600 state gas, below the
 pinned state limit. The reports contain each transaction hash and per-frame
 results. This suite, not Forge, bounds settlement gas, because it deploys the
 `libsmall` Poseidon builds a real pool uses, while the Forge suite runs the
@@ -152,13 +153,13 @@ old proof fails both with its old root and when rebound to the new root. A
 rebuilt proof for the new position succeeds. This tests application recovery
 under database rollback, not consensus fork choice or network reorganization.
 
-Large-tree tests seed the exact frontier and balance of repeated funded
-deposits, then execute proof verification and settlement normally. They cover
-the longest carry, nearly full and full tree rollover, and spending a newly
-created output from the rolled epoch. They do not execute a million deposit
-transactions. Two additional tests inject conservative storage-bound states
-(an empty active epoch and a zero frontier); those states are not claimed to
-have been reached by deposits.
+Large-tree tests seed the exact MMR (roots, chains, ranks, depth and count) and
+balance of repeated funded deposits, then execute proof verification and
+settlement normally. They cover two merges in a row, two new trees at fresh
+depths, nearly full and full tree rollover, and spending a newly created output
+from the rolled epoch. They do not execute two million deposit transactions.
+Further cases refuse a frontier that does not open the spend's root: a changed
+root or count, a nonzero root above the depth, and a depth above `MAX_TREES`.
 
 The settlement limits are in the README's
 [frame table](../../README.md#transactions). `run.ts` refuses an ethrex source
@@ -171,10 +172,10 @@ with `ETHREX_SOURCE` set to it. The report names the revision it ran on, with
 the same scenarios gave identical results, gas included, before notes were
 added.
 
-The old-limit regression deploys a separate dispatcher with only the pinned
-settlement limit changed back to 1.4 million. It requires settlement to fail
-after the nonce keys are consumed. The same long carry must settle successfully
-under the new profile. Every accepted transaction's frame statuses are
+The low-limit regression deploys a separate dispatcher with only the pinned
+settlement limit changed to 100,000. It requires settlement to fail after the
+nonce keys are consumed. The same two merges must settle successfully under the
+real profile. Every accepted transaction's frame statuses are
 asserted, so a frame that runs out of gas fails its case. The per-frame
 comparison with declared limits is only a consistency check: a frame that runs
 out still reports usage within its limit, so margin is tracked by the measured

@@ -1,18 +1,24 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.24;
 
+import {LibSkewMmr} from "skew-mmr/lib/LibSkewMmr.sol";
 import {ShieldedPoolLogic} from "../src/ShieldedPoolLogic.sol";
 
-// ShieldedPoolLogic's storage slots, which the tests write to set up tree states.
-// filledSubtrees[l] is slot FILLED_SUBTREES_SLOT + l.
-uint256 constant FILLED_SUBTREES_SLOT = 0;
-uint256 constant NEXT_INDEX_SLOT = 21;
-uint256 constant CURRENT_ROOT_SLOT = 22;
-uint256 constant CURRENT_EPOCH_SLOT = 24;
+// ShieldedPoolLogic's storage slots, which the tests write to set up MMR states. The MMR's
+// roots[i] is slot MMR_ROOTS_SLOT + i and chains[i] is MMR_CHAINS_SLOT + i; its depth is the
+// low byte of MMR_DEPTH_COUNT_SLOT and its count the eight bytes above.
+uint256 constant CURRENT_ROOT_SLOT = 0;
+uint256 constant CURRENT_EPOCH_SLOT = 2;
+uint256 constant MMR_ROOTS_SLOT = 4;
+uint256 constant MMR_PACKED_RANKS_SLOT = 46;
+uint256 constant MMR_DEPTH_COUNT_SLOT = 47;
+uint256 constant MMR_MAX_DEPTH_SLOT = 48;
+uint256 constant MMR_CHAINS_SLOT = 49;
 
 uint256 constant P = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
-uint256 constant TREE_CAPACITY = 1 << 20;
-bytes32 constant EMPTY_ROOT = 0x2134e76ac5d21aab186c2be1dd8f84ee880a1e46eaf712f9d371b6df22191f3e;
+uint256 constant MAX_TREES = 20;
+uint256 constant TREE_CAPACITY = 2 ** (MAX_TREES + 1) - MAX_TREES - 2;
+bytes32 constant EMPTY_ROOT = 0x012893657d8eb2efad4de0a91bcd0e39ad9837745dec3ea923737ea803fc8e3d;
 
 // The note lengths the pool admits: one note for a shield, two for a spend, and either
 // after a first payment's ML-KEM-768 ciphertext.
@@ -27,44 +33,42 @@ interface Vm {
     function expectEmit(bool, bool, bool, bool) external;
     function expectRevert(bytes4) external;
     function getDeployedCode(string calldata artifactPath) external returns (bytes memory);
+    function load(address, bytes32) external view returns (bytes32);
     function store(address, bytes32, bytes32) external;
 }
 
 interface IPool {
-    function shield(bytes32 inner, bytes calldata note) external payable returns (uint32);
+    function shield(bytes32 inner, bytes calldata note) external payable returns (uint64);
     function settle(ShieldedPoolLogic.Spend calldata s) external;
     function publishEpochRoot(uint64 epoch) external;
     function claimWithdrawal(address payable who) external;
     function currentRoot() external view returns (bytes32);
     function currentEpoch() external view returns (uint64);
-    function nextIndex() external view returns (uint32);
+    function nextIndex() external view returns (uint64);
     function finalRoot(uint64) external view returns (bytes32);
     function withdrawalCredit(address) external view returns (uint256);
     function domain(uint64 epoch) external view returns (bytes32);
     function sourceId(uint64) external view returns (bytes32);
 }
 
-/// Stands in for PoseidonT3 with a keccak hash, so most tests run cheaply. MockPoseidonT4
-/// does the same for PoseidonT4.
-contract MockPoseidonT3 {
-    function hash2(uint256 x0, uint256 x1) external pure returns (uint256) {
-        return uint256(keccak256(abi.encode(x0, x1))) % P;
-    }
-}
-
+/// Stands in for PoseidonT4 with a keccak hash, so most tests run cheaply.
 contract MockPoseidonT4 {
     function hash3(uint256 x0, uint256 x1, uint256 x2) external pure returns (uint256) {
         return uint256(keccak256(abi.encode(x0, x1, x2))) % P;
     }
 }
 
-/// Stands in for the dispatcher: stores EMPTY_ROOT at deployment and delegates every call.
+/// Stands in for the dispatcher: stores EMPTY_ROOT and the MMR's maxDepth at deployment, as
+/// its constructor does, and delegates every call.
 contract LogicProxy {
     address immutable implementation;
 
     constructor(address implementation_) {
         implementation = implementation_;
-        assembly { sstore(CURRENT_ROOT_SLOT, EMPTY_ROOT) }
+        assembly {
+            sstore(CURRENT_ROOT_SLOT, EMPTY_ROOT)
+            sstore(MMR_MAX_DEPTH_SLOT, MAX_TREES)
+        }
     }
 
     /// The dispatcher's SENDER frame: settle(Spend) calldata with the notes appended.
@@ -156,21 +160,18 @@ contract DispatcherPoolTest {
 
     /// A pool over the mock hashes, funded so withdrawals can be paid.
     function setUp() public {
-        MockPoseidonT3 t3 = new MockPoseidonT3();
         MockPoseidonT4 t4 = new MockPoseidonT4();
-        logic = new ShieldedPoolLogic(address(t3), address(t4));
+        logic = new ShieldedPoolLogic(address(t4));
         proxy = new LogicProxy(address(logic));
         pool = IPool(address(proxy));
         vm.deal(address(proxy), 100 ether);
     }
 
-    /// A second pool whose logic calls the real PoseidonT3 and PoseidonT4 runtimes.
+    /// A second pool whose logic calls the real PoseidonT4 runtime.
     function _realPool() internal returns (LogicProxy realProxy, IPool realPool) {
-        address t3 = address(0xA003);
         address t4 = address(0xA004);
-        vm.etch(t3, vm.getDeployedCode("PoseidonT3.sol:PoseidonT3"));
         vm.etch(t4, vm.getDeployedCode("PoseidonT4.sol:PoseidonT4"));
-        realProxy = new LogicProxy(address(new ShieldedPoolLogic(t3, t4)));
+        realProxy = new LogicProxy(address(new ShieldedPoolLogic(t4)));
         realPool = IPool(address(realProxy));
     }
 
@@ -178,12 +179,25 @@ contract DispatcherPoolTest {
         vm.store(target, bytes32(slot), bytes32(value));
     }
 
-    /// Gives filledSubtrees[0..levels - 1] nonzero values, as a tree with those levels
-    /// occupied has.
-    function _fillSubtrees(address target, uint256 levels) internal {
-        for (uint256 l; l < levels; l++) {
-            _store(target, FILLED_SUBTREES_SLOT + l, l + 1);
+    /// Writes the MMR of `count` notes: the ranks of count's skew-binary form, largest first,
+    /// as LibSkewMmr holds them, with nonzero placeholder roots and chains.
+    function _seedMmr(address target, uint256 count) internal {
+        uint256 packedRanks;
+        uint256 depth;
+        uint256 left = count;
+        for (uint256 rank = MAX_TREES; rank > 0; rank--) {
+            // A tree of rank r holds 2^(r + 1) - 1 notes.
+            uint256 size = 2 ** rank - 1;
+            while (left >= size) {
+                packedRanks |= (rank - 1) << (6 * depth);
+                _store(target, MMR_ROOTS_SLOT + depth, depth + 1);
+                _store(target, MMR_CHAINS_SLOT + depth, depth + 1);
+                depth++;
+                left -= size;
+            }
         }
+        _store(target, MMR_PACKED_RANKS_SLOT, packedRanks);
+        _store(target, MMR_DEPTH_COUNT_SLOT, depth | (count << 8));
     }
 
     /// A spend of epoch 0 on the mock pool, with fixed nullifiers.
@@ -192,6 +206,8 @@ contract DispatcherPoolTest {
         view
         returns (ShieldedPoolLogic.Spend memory s)
     {
+        // The logic never reads the frontier: the dispatcher checks it against root.
+        bytes32[MAX_TREES] memory frontier;
         s = ShieldedPoolLogic.Spend({
             root: bytes32(uint256(7)),
             rootSlot: 9,
@@ -204,7 +220,11 @@ contract DispatcherPoolTest {
             publicAmount: amount,
             fee: 1,
             recipient: recipient,
-            authorizer: address(0xA11CE)
+            authorizer: address(0xA11CE),
+            count: 0,
+            packedRanks: 0,
+            depth: 0,
+            frontier: frontier
         });
     }
 
@@ -241,16 +261,16 @@ contract DispatcherPoolTest {
 
     function test_shield_does_not_call_recent_root_predeploy() public {
         vm.etch(ROOT_PREDEPLOY, type(RevertingRecentRoot).runtimeCode);
-        uint32 index = pool.shield{value: 1 ether}(bytes32(uint256(33)), _note());
+        uint64 index = pool.shield{value: 1 ether}(bytes32(uint256(33)), _note());
         require(index == 0 && pool.nextIndex() == 1, "shield did not settle");
     }
 
-    function test_repeated_deposit_creates_two_separately_funded_occurrences() public {
+    function test_repeated_deposit_appends_two_funded_copies() public {
         bytes32 inner = bytes32(uint256(33));
         uint256 beforeBalance = address(pool).balance;
-        uint32 first = pool.shield{value: 1 ether}(inner, _note());
+        uint64 first = pool.shield{value: 1 ether}(inner, _note());
         bytes32 firstRoot = pool.currentRoot();
-        uint32 second = pool.shield{value: 1 ether}(inner, _note());
+        uint64 second = pool.shield{value: 1 ether}(inner, _note());
         require(first == 0 && second == 1 && pool.nextIndex() == 2, "deposit occurrence missing");
         require(pool.currentRoot() != firstRoot, "duplicate was not appended");
         require(address(pool).balance == beforeBalance + 2 ether, "both deposits must be funded");
@@ -260,10 +280,12 @@ contract DispatcherPoolTest {
 
     function test_actual_poseidon_library_runtimes_work_via_staticcall() public {
         (LogicProxy realProxy, IPool realPool) = _realPool();
-        uint32 index = realPool.shield{value: 1}(bytes32(uint256(99)), _note());
-        require(index == 0 && realPool.currentRoot() != EMPTY_ROOT, "actual Poseidon calls failed");
+        realPool.shield{value: 1}(bytes32(uint256(99)), _note());
+        uint64 index = realPool.shield{value: 1}(bytes32(uint256(98)), _note());
+        realPool.shield{value: 1}(bytes32(uint256(97)), _note());
+        require(index == 1 && realPool.currentRoot() != EMPTY_ROOT, "actual Poseidon calls failed");
 
-        _store(address(realProxy), NEXT_INDEX_SLOT, TREE_CAPACITY - 1);
+        _seedMmr(address(realProxy), TREE_CAPACITY - 1);
         ShieldedPoolLogic.Spend memory s = _spend(bytes32(uint256(301)), bytes32(uint256(302)), 0, address(0));
         s.domain = realPool.domain(0);
         realProxy.settleAsSelf(s, _notes());
@@ -272,21 +294,20 @@ contract DispatcherPoolTest {
 
     // Settlement gas. Forge charges one gas dimension, so these tests check only the
     // settlement frame's 2,000,000 execution limit; the native suite checks the execution
-    // and state limits under ethrex. On native ethrex 247e2dd2, settlements at 262,143 and
-    // 524,287 leaves ran out of gas under a 1.4M limit after validation had approved, which
-    // is why the limit is 2M. These tests carry the largest notes the dispatcher admits, a
-    // first payment's, and run the default profile's Poseidon builds, 8 to 9% cheaper per
-    // hash than the libsmall builds the pool deploys and the native suite runs.
+    // and state limits under ethrex. An append takes at most one Poseidon hash, so the
+    // heaviest settlements are a rollover and two merges in a row. These tests carry the
+    // largest notes the dispatcher admits, a first payment's, and run the default profile's
+    // Poseidon build, 8 to 9% cheaper per hash than the libsmall build the pool deploys and
+    // the native suite runs.
 
     function test_two_million_gas_covers_rollover_settlement() public {
         (LogicProxy realProxy, IPool realPool) = _realPool();
 
-        // A tree one leaf short of full has every filled-subtree slot below the root
-        // occupied. The settlement must finalize that epoch, clear it, append two outputs,
-        // compute the new root, and create a fresh withdrawal credit.
-        _fillSubtrees(address(realProxy), 20);
+        // An MMR one note short of full holds MAX_TREES - 1 trees. The settlement must
+        // finalize that epoch, reset it, append two outputs and create a fresh withdrawal
+        // credit.
+        _seedMmr(address(realProxy), TREE_CAPACITY - 1);
         bytes32 oldRoot = bytes32(uint256(777));
-        _store(address(realProxy), NEXT_INDEX_SLOT, TREE_CAPACITY - 1);
         vm.store(address(realProxy), bytes32(CURRENT_ROOT_SLOT), oldRoot);
         ShieldedPoolLogic.Spend memory s = _spend(bytes32(uint256(401)), bytes32(uint256(402)), 7, address(0xB0B));
         s.domain = realPool.domain(0);
@@ -304,49 +325,28 @@ contract DispatcherPoolTest {
         require(realPool.withdrawalCredit(address(0xB0B)) == 7, "credit missing");
     }
 
-    function test_two_million_gas_covers_longest_non_rollover_hash_path() public {
-        (LogicProxy realProxy, IPool realPool) = _realPool();
-
-        // First insertion carries through 19 occupied subtree levels. The
-        // second leaves a partial tree, requiring all 20 root hashes too.
-        _fillSubtrees(address(realProxy), 19);
-        _store(address(realProxy), NEXT_INDEX_SLOT, (1 << 19) - 1);
-        ShieldedPoolLogic.Spend memory s = _spend(bytes32(uint256(501)), bytes32(uint256(502)), 7, address(0xB0B));
-        s.domain = realPool.domain(0);
-
-        bytes memory call = abi.encodeCall(LogicProxy.settleAsSelf, (s, _firstPaymentNotes()));
-        uint256 beforeGas = gasleft();
-        (bool ok,) = address(realProxy).call{gas: SETTLE_FRAME_GAS}(call);
-        emit SettlementGasMeasured(beforeGas - gasleft());
-        require(ok, "long carry exhausted settlement cap");
-        require(realPool.currentEpoch() == 0, "long carry unexpectedly rolled");
-        require(realPool.nextIndex() == (1 << 19) + 1, "long carry outputs missing");
-        require(realPool.withdrawalCredit(address(0xB0B)) == 7, "long carry credit missing");
-    }
-
-    /// Settles a long carry at nextIndex with the gas a 2,000,000 frame forwards past the
-    /// dispatcher's delegatecall: all but 1/64 (EIP-150).
-    function _longCarryWithForwardedBudget(uint32 nextIndex) internal {
+    /// Settles two merges in a row with the gas a 2,000,000 frame forwards past the
+    /// dispatcher's delegatecall: all but 1/64 (EIP-150). The MMR's smallest trees have ranks
+    /// 1 and 1, so the first output merges them into a rank-2 tree beside another, and the
+    /// second output merges those two.
+    function test_forwarded_two_million_covers_two_merges() public {
         (LogicProxy realProxy, IPool realPool) = _realPool();
         vm.deal(address(realProxy), 100 ether);
-        _fillSubtrees(address(realProxy), 20);
-        _store(address(realProxy), NEXT_INDEX_SLOT, nextIndex);
+        // Trees of ranks 18 down to 2, then 1 and 1: 2^20 - 21 notes, less trees of ranks 0
+        // and 1, plus two of rank 1.
+        uint256 count = (1 << 20) - 21 - 1 - 3 + 6;
+        _seedMmr(address(realProxy), count);
         ShieldedPoolLogic.Spend memory s = _spend(bytes32(uint256(501)), bytes32(uint256(502)), 7, address(0xB0B));
         s.domain = realPool.domain(0);
         uint256 forwarded = (SETTLE_FRAME_GAS * 63) / 64;
         bytes memory call = abi.encodeCall(LogicProxy.settleAsSelf, (s, _firstPaymentNotes()));
+        uint256 beforeGas = gasleft();
         (bool ok,) = address(realProxy).call{gas: forwarded}(call);
-        require(ok, "long-carry settlement exhausted EIP-150 forwarded 2M");
-        require(realPool.nextIndex() == nextIndex + 2, "outputs missing");
+        emit SettlementGasMeasured(beforeGas - gasleft());
+        require(ok, "two merges exhausted EIP-150 forwarded 2M");
+        require(uint256(vm.load(address(realProxy), bytes32(MMR_DEPTH_COUNT_SLOT))) & 0xff == 17, "no merges");
+        require(realPool.nextIndex() == count + 2, "outputs missing");
         require(realPool.withdrawalCredit(address(0xB0B)) == 7, "credit missing");
-    }
-
-    function test_forwarded_two_million_covers_long_carry_at_262143() public {
-        _longCarryWithForwardedBudget(262143);
-    }
-
-    function test_forwarded_two_million_covers_long_carry_at_524287() public {
-        _longCarryWithForwardedBudget(524287);
     }
 
     function test_settlement_does_not_call_recent_root_predeploy() public {
@@ -358,7 +358,7 @@ contract DispatcherPoolTest {
 
     function test_two_output_spend_rolls_before_cap_boundary() public {
         bytes32 oldRoot = bytes32(uint256(777));
-        _store(address(proxy), NEXT_INDEX_SLOT, TREE_CAPACITY - 1);
+        _seedMmr(address(proxy), TREE_CAPACITY - 1);
         vm.store(address(proxy), bytes32(CURRENT_ROOT_SLOT), oldRoot);
         ShieldedPoolLogic.Spend memory s = _spend(bytes32(uint256(201)), bytes32(uint256(202)), 0, address(0));
         _settle(s);
@@ -368,7 +368,7 @@ contract DispatcherPoolTest {
     }
 
     function test_full_tree_exit_consumes_no_capacity() public {
-        _store(address(proxy), NEXT_INDEX_SLOT, TREE_CAPACITY);
+        _seedMmr(address(proxy), TREE_CAPACITY);
         ShieldedPoolLogic.Spend memory s = _spend(SINK_0, SINK_1, 5 ether, address(0xB0B));
         _settle(s);
         require(pool.currentEpoch() == 0, "exit rolled epoch");
@@ -435,21 +435,25 @@ contract DispatcherPoolTest {
     }
 
     function test_filling_the_last_leaf_keeps_the_full_tree_root() public {
-        // A tree of 2^20 - 1 identical leaves; the last deposit fills it.
+        // An MMR one note short of full; the last deposit fills it.
         bytes32 inner = bytes32(uint256(33));
-        bytes32[21] memory level;
-        level[0] = bytes32(uint256(keccak256(abi.encode(uint256(2), uint256(inner), uint256(1 ether)))) % P);
-        for (uint256 l = 0; l < 20; l++) {
-            level[l + 1] = bytes32(uint256(keccak256(abi.encode(level[l], level[l]))) % P);
-            vm.store(address(proxy), bytes32(FILLED_SUBTREES_SLOT + l), level[l]);
-        }
-        _store(address(proxy), NEXT_INDEX_SLOT, TREE_CAPACITY - 1);
+        _seedMmr(address(proxy), TREE_CAPACITY - 1);
         pool.shield{value: 1 ether}(inner, _note());
-        require(pool.nextIndex() == TREE_CAPACITY, "last leaf not filled");
-        require(pool.currentRoot() == level[20], "full tree root lost");
+        require(pool.nextIndex() == TREE_CAPACITY, "last note not appended");
+        bytes32 fullRoot = pool.currentRoot();
         // The next deposit rolls the epoch and finalizes that same root.
         pool.shield{value: 1 ether}(inner, _note());
-        require(pool.currentEpoch() == 1 && pool.finalRoot(0) == level[20], "final root lost");
+        require(pool.currentEpoch() == 1 && pool.finalRoot(0) == fullRoot, "final root lost");
+        require(pool.nextIndex() == 1, "deposit missing from the new epoch");
+    }
+
+    /// The dispatcher's constructor writes maxDepth to MMR_MAX_DEPTH_SLOT, and the pool's
+    /// appends read it there: capped at one tree, a second deposit needs a second tree.
+    function test_mmr_max_depth_is_at_the_slot_the_dispatcher_writes() public {
+        _store(address(proxy), MMR_MAX_DEPTH_SLOT, 1);
+        pool.shield{value: 1}(bytes32(uint256(33)), _note());
+        vm.expectRevert(LibSkewMmr.TooDeep.selector);
+        pool.shield{value: 1}(bytes32(uint256(34)), _note());
     }
 
     function test_withdrawal_credits_to_one_recipient_accumulate() public {
@@ -475,7 +479,7 @@ contract DispatcherPoolTest {
     }
 
     function test_old_epoch_spend_uses_input_domain_after_rollover() public {
-        _store(address(proxy), NEXT_INDEX_SLOT, TREE_CAPACITY);
+        _seedMmr(address(proxy), TREE_CAPACITY);
         pool.shield{value: 1}(bytes32(uint256(33)), _note());
         require(pool.currentEpoch() == 1, "epoch did not roll");
         ShieldedPoolLogic.Spend memory s = _spend(bytes32(uint256(81)), bytes32(uint256(82)), 0, address(0));

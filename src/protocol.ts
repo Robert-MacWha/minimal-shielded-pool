@@ -35,14 +35,14 @@ const fits = (value: bigint, bits: bigint) => value >= 0n && value < 1n << bits;
 
 // ---- field, tree and note hashes (mirror core/circuits/spend.circom) ----
 
-export const DEPTH = 20;
-export const TREE_CAPACITY = 1n << BigInt(DEPTH);
+/** The most trees an epoch's skew-MMR holds, as in the circuit, the dispatcher and the pool. */
+export const MAX_TREES = 20;
+/** An MMR of at most MAX_TREES trees holds 2^(MAX_TREES + 1) - MAX_TREES - 2 notes. */
+export const TREE_CAPACITY = (1n << BigInt(MAX_TREES + 1)) - BigInt(MAX_TREES) - 2n;
 /** An owner set is a depth-16 tree of addresses, so it holds up to 2^16 one-time signers. */
 export const OWNER_DEPTH = 16;
 /** Values are below 2^128, so the circuit's conservation sum cannot wrap the field. */
 export const MAX_VALUE = 1n << 128n;
-/** The root of the empty depth-20 tree, which the dispatcher stores at deployment. */
-export const EMPTY_ROOT = 0x2134e76ac5d21aab186c2be1dd8f84ee880a1e46eaf712f9d371b6df22191f3en;
 
 export const TAG_PK = 1n;
 export const TAG_LEAF = 2n;
@@ -77,7 +77,7 @@ export function commitment(pk: bigint, rho: bigint, value: bigint): bigint {
 }
 
 /**
- * The domain key p2(domain, nk). With a note's position, it finds when the note is spent in that
+ * The domain key p2(domain, nk). With a note's commitment, it finds when the note is spent in that
  * epoch's domain, so disclosure receipts publish it and never nk.
  */
 export function domainKey(domain: bigint, nk: bigint): bigint {
@@ -85,17 +85,16 @@ export function domainKey(domain: bigint, nk: bigint): bigint {
 }
 
 /**
- * A note occurrence's nullifier from its domain key. The leaf index is hashed in, so two
- * deposits of one commitment are spent independently.
+ * A note's nullifier from its key. It binds the commitment and not the note's index, so two
+ * deposits of one commitment in an epoch share a nullifier and only one can be spent.
  */
-export function nullifierFromKey(key: bigint, cm: bigint, index: bigint): bigint {
-  if (!fits(index, BigInt(DEPTH))) throw new InputError("note index outside the depth-20 tree");
-  return tagged(TAG_OCCURRENCE_NULL, key, p2(cm, index));
+export function nullifierFromKey(key: bigint, cm: bigint): bigint {
+  return tagged(TAG_OCCURRENCE_NULL, key, cm);
 }
 
-/** A note occurrence's nullifier in the domain of the epoch it was appended to. */
-export function nullifier(domain: bigint, nk: bigint, cm: bigint, index: bigint): bigint {
-  return nullifierFromKey(domainKey(domain, nk), cm, index);
+/** A note's nullifier in the domain of the epoch it was appended to. */
+export function nullifier(domain: bigint, nk: bigint, cm: bigint): bigint {
+  return nullifierFromKey(domainKey(domain, nk), cm);
 }
 
 export const DOMAIN_TAG = keccak(utf8("minimal-shielded-pool:occurrence-domain:v1"));
@@ -110,6 +109,48 @@ export function domainScalar(chainId: bigint, pool: bigint | string, epoch = 0n)
     throw new InputError("domain inputs must be uint256 chain_id, address20 pool and uint64 epoch");
   }
   return toBigint(keccak(concat(DOMAIN_TAG, word(chainId), word(address), word(epoch)))) % P;
+}
+
+// ---- the MMR's frontier (mirrors LibSkewMmr and LibSkewMmrVerifier) ----
+
+/** An epoch's MMR as the pool holds it: its tree roots, oldest first, and their ranks. */
+export interface Frontier {
+  roots: readonly bigint[];
+  ranks: readonly number[];
+  /** The number of notes the MMR holds. */
+  count: bigint;
+}
+
+/** The ranks as LibSkewMmr packs them, tree i's rank at bits 6i to 6i + 6. */
+export function packRanks(ranks: readonly number[]): bigint {
+  return ranks.reduce((packed, rank, i) => packed | (BigInt(rank) << BigInt(6 * i)), 0n);
+}
+
+/**
+ * The root the pool publishes for a frontier: keccak256(chain, packedRanks, depth, count) over
+ * words, where chain folds keccak256(chain, root) over the roots from zero.
+ */
+export function frontierRoot({ roots, ranks, count }: Frontier): bigint {
+  const chain = roots.reduce((c, root) => toBigint(keccak(concat(word(c), word(root)))), 0n);
+  const depth = BigInt(roots.length);
+  return toBigint(keccak(concat(word(chain), word(packRanks(ranks)), word(depth), word(count))));
+}
+
+/** The root of an empty MMR, which the dispatcher stores at deployment. */
+export const EMPTY_ROOT = frontierRoot({ roots: [], ranks: [], count: 0n });
+
+/** The frontier's fields of a Spend: the roots padded with zeros to MAX_TREES. */
+export function frontierFields(
+  f: Frontier,
+): Pick<Spend, "count" | "packedRanks" | "depth" | "frontier"> {
+  const padding = Array<bigint>(MAX_TREES - f.roots.length).fill(0n);
+  const depth = BigInt(f.roots.length);
+  return {
+    count: f.count,
+    packedRanks: packRanks(f.ranks),
+    depth,
+    frontier: [...f.roots, ...padding],
+  };
 }
 
 // ---- statement and hybrid compression ----
@@ -139,10 +180,7 @@ export function sinkCommitments(): bigint[] {
   return outputCommitments(sinkOutputs());
 }
 
-/**
- * The nullifiers of inputs in the owner set with root ownerRoot, in order; a dummy is never in
- * the tree and uses index 0.
- */
+/** The nullifiers of inputs in the owner set with root ownerRoot, in order. */
 export function inputNullifiers(
   domain: bigint,
   ownerRoot: bigint,
@@ -150,7 +188,7 @@ export function inputNullifiers(
 ): bigint[] {
   return inputs.map((i) => {
     const cm = commitment(ownerPk(ownerRoot, i.nk), i.rho, i.value);
-    return nullifier(domain, i.nk, cm, i.idx ?? 0n);
+    return nullifier(domain, i.nk, cm);
   });
 }
 
@@ -159,35 +197,38 @@ export function outputCommitments(outputs: readonly Output[]): bigint[] {
 }
 
 /**
- * What a proof binds: the settlement's values but its root slot and epoch, then the owner, the
- * address the pool reads from the owner's signature entry.
+ * What a proof binds: the settlement's values but its root, root slot, epoch and count, then the
+ * owner, the address the pool reads from the owner's signature entry.
  */
-export type Statement = Omit<Spend, "rootSlot" | "epoch"> & { owner: bigint };
+export type Statement = Omit<Spend, "root" | "rootSlot" | "epoch" | "count"> & { owner: bigint };
 
-export const STATEMENT_LENGTH = 11;
+/** The statement's length: ten spend values, packedRanks, depth and the padded frontier. */
+export const STATEMENT_LENGTH = 12 + MAX_TREES;
 
-/** The eleven values a proof binds, in the order the circuit and the pool hash them. */
+/** The values a proof binds, in the order the circuit and the pool hash them. */
 export function statement(s: Statement): bigint[] {
-  const hashes = [s.nf1, s.nf2, s.outCm1, s.outCm2, s.root, s.domain];
-  return [...hashes, s.publicAmount, s.fee, s.recipient, s.authorizer, s.owner];
+  const hashes = [s.nf1, s.nf2, s.outCm1, s.outCm2, s.domain];
+  const terms = [s.publicAmount, s.fee, s.recipient, s.authorizer, s.owner];
+  return [...hashes, ...terms, s.packedRanks, s.depth, ...s.frontier];
 }
 
 /**
- * The contract-side hash: keccak256 of the eleven values as words, mod P. The pool refuses a
- * word at or above P, since x + P would give another alpha for the same statement, and so does
- * this.
+ * The contract-side hash: keccak256 of the values as words, mod P. The pool refuses a word at
+ * or above P, since x + P would give another alpha for the same statement, and so does this.
  */
 export function compressionAlpha(stmt: readonly bigint[]): bigint {
   if (stmt.length !== STATEMENT_LENGTH || stmt.some((x) => x < 0n || x >= P)) {
-    throw new RangeError("a statement is eleven field elements");
+    throw new RangeError(`a statement is ${STATEMENT_LENGTH} field elements`);
   }
   return toBigint(keccak(concat(...stmt.map(word)))) % P;
 }
 
-/** The circuit-side hash: Poseidon of the eleven values. */
+/** The circuit-side hash: the values chained into Poseidon of two, from zero (StatementDigest). */
 export function compressionBeta(stmt: readonly bigint[]): bigint {
-  if (stmt.length !== STATEMENT_LENGTH) throw new RangeError("a statement is eleven values");
-  return poseidon(stmt);
+  if (stmt.length !== STATEMENT_LENGTH) {
+    throw new RangeError(`a statement is ${STATEMENT_LENGTH} values`);
+  }
+  return stmt.reduce((digest, x) => poseidon([digest, x]), 0n);
 }
 
 /** x0 + x1 * sigma + ... + xn * sigma^n mod P. The pool's gamma uses sigma = alpha + beta. */
@@ -279,7 +320,10 @@ export function recentRootStorageKey(source: Uint8Array, slot: bigint): Uint8Arr
 
 // ---- pool ABI ----
 
-/** settle(Spend)'s fields in ABI order, each one word of the calldata, with their types. */
+/**
+ * settle(Spend)'s fields in ABI order, each one word of the calldata, with their types. The
+ * frontier's MAX_TREES words follow them.
+ */
 const SPEND_ABI = {
   root: "bytes32",
   rootSlot: "uint64",
@@ -293,12 +337,15 @@ const SPEND_ABI = {
   fee: "uint256",
   recipient: "address",
   authorizer: "address",
+  count: "uint64",
+  packedRanks: "uint256",
+  depth: "uint256",
 } as const;
 
-export type Spend = Record<keyof typeof SPEND_ABI, bigint>;
-export const SPEND_FIELDS = Object.keys(SPEND_ABI) as (keyof Spend)[];
+export type Spend = Record<keyof typeof SPEND_ABI, bigint> & { frontier: readonly bigint[] };
+export const SPEND_FIELDS = Object.keys(SPEND_ABI) as (keyof typeof SPEND_ABI)[];
 
-export const SPEND_TUPLE = `(${Object.values(SPEND_ABI).join(",")})`;
+export const SPEND_TUPLE = `(${[...Object.values(SPEND_ABI), `bytes32[${MAX_TREES}]`].join(",")})`;
 
 export function selector(signature: string): Uint8Array {
   return keccak(utf8(signature)).slice(0, 4);
@@ -315,7 +362,7 @@ export const VERIFY_PROOF_SELECTOR = selector(
   "verifyProof(uint256[2],uint256[2][2],uint256[2],uint256[3])",
 );
 
-export const LEAF_APPENDED = eventTopic("LeafAppended(bytes32,uint64,uint32,bytes32)");
+export const LEAF_APPENDED = eventTopic("LeafAppended(bytes32,uint64,uint64,bytes32)");
 export const NOTE_SPENT = eventTopic("NoteSpent(bytes32)");
 export const NOTES = eventTopic("Notes(bytes)");
 
@@ -336,13 +383,16 @@ function checkNotes(notes: Uint8Array, sizes: readonly number[], what: string): 
 
 /**
  * settle(Spend) calldata followed by the spend's notes, as the SENDER frame carries them. The
- * tuple is static, so its 12 words follow the selector with no offset word. The pool publishes
- * the notes and never reads them.
+ * tuple is static, so its 15 + MAX_TREES words follow the selector with no offset word. The
+ * pool publishes the notes and never reads them.
  */
 export function encodeSettle(spend: Spend, notes: Uint8Array): Uint8Array {
   const words = SPEND_FIELDS.map((f) => abiWord(spend[f], SPEND_ABI[f], `settle ${f}`));
+  if (spend.frontier.length !== MAX_TREES)
+    throw new InputError(`settle frontier must be ${MAX_TREES} roots`);
+  const frontier = spend.frontier.map((root) => abiWord(root, "bytes32", "settle frontier"));
   checkNotes(notes, SPEND_NOTES_BYTES, "spend");
-  return concat(SETTLE_SELECTOR, ...words, notes);
+  return concat(SETTLE_SELECTOR, ...words, ...frontier, notes);
 }
 
 /**
@@ -354,8 +404,12 @@ export function decodeSettle(calldata: Uint8Array): { spend: Spend; notes: Uint8
   const sized = SETTLE_FRAME_DATA_BYTES.includes(calldata.length);
   if (!sized || !equalBytes(calldata.subarray(0, 4), SETTLE_SELECTOR)) return null;
   const at = (i: number) => toBigint(calldata.subarray(4 + 32 * i, 36 + 32 * i));
-  const spend = Object.fromEntries(SPEND_FIELDS.map((f, i) => [f, at(i)])) as Spend;
-  return { spend, notes: calldata.slice(SETTLE_SPEND_BYTES) };
+  const fields = Object.fromEntries(SPEND_FIELDS.map((f, i) => [f, at(i)])) as Omit<
+    Spend,
+    "frontier"
+  >;
+  const frontier = Array.from({ length: MAX_TREES }, (_, i) => at(SPEND_FIELDS.length + i));
+  return { spend: { ...fields, frontier }, notes: calldata.slice(SETTLE_SPEND_BYTES) };
 }
 
 /** shield(bytes32 inner, bytes note): inner, offset 0x40, length, the note padded to words. */
@@ -420,7 +474,7 @@ export interface LeafAppended {
 }
 
 /**
- * The fields of a LeafAppended(bytes32 indexed cm, uint64 indexed epoch, uint32 index, bytes32
+ * The fields of a LeafAppended(bytes32 indexed cm, uint64 indexed epoch, uint64 index, bytes32
  * newRoot) log, or null for any other log; one with this topic but malformed fields throws.
  * Topics may be unpadded and topic 0 in any case. Check the log's address first: any contract
  * can emit this topic, and a malformed look-alike would make a shield, disclosure or note scan
