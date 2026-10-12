@@ -1,7 +1,7 @@
 /// @title ShieldedPoolDispatcher
 /// @notice The pool's account code, an immutable EIP-8141 validation shell. A call with
 /// exactly 288 bytes of calldata is the VERIFY entry: it checks a spend's frames, recent
-/// root, nonce keys, signature, proof and fee, then approves execution and payment. Every
+/// root, nonce keys, signatures, proof and fee, then approves execution and payment. Every
 /// other call is delegated to ShieldedPoolLogic, which keeps the pool's state in this
 /// account's storage.
 /// @dev Runtime layout: this code, then the ShieldedPoolLogic address and the Groth16
@@ -49,7 +49,7 @@ object "ShieldedPoolDispatcher" {
 
             // Refusals revert with a 4-byte error selector. errCanonical, errValue, errDomain
             // and errNullifier are ShieldedPoolLogic's NotCanonical(), ValueTooLarge(),
-            // InvalidDomain() and ZeroNullifier().
+            // InvalidDomain() and ZeroNullifier(), and errOwner is InvalidOwnerSignature().
             function fail(sel) {
                 mstore(0, shl(224, sel))
                 revert(0, 4)
@@ -64,6 +64,7 @@ object "ShieldedPoolDispatcher" {
             function errDomain() -> s { s := 0xeb127982 }
             function errNullifier() -> s { s := 0xcbbbbfe1 }
             function errAuthorizer() -> s { s := 0xb4683784 }
+            function errOwner() -> s { s := 0x38a85a8d }
 
             // BN254's scalar field order p, the circuit's field.
             function scalarField() -> v {
@@ -99,6 +100,36 @@ object "ShieldedPoolDispatcher" {
                 d := mod(keccak256(0, 0x80), scalarField())
             }
 
+            // The EIP-712 digest of the spend's intent, which the owner signs (intentDigest in
+            // src/protocol.ts): keccak256(0x1901 || domainSeparator || structHash), with the
+            // struct's fields read from frame settleIndex's settle(Spend) call. The domain names
+            // this pool and chain, so an intent signed for one pool authorizes nothing in another.
+            function intentDigest(settleIndex) -> digest {
+                // keccak256 of the struct's type, src/protocol.ts's INTENT_TYPE: "Spend(bytes32
+                // nullifier1,bytes32 nullifier2,bytes32 output1,bytes32 output2,uint256 amount,
+                // address recipient,uint256 fee)" without the line breaks.
+                mstore(0, 0x5bc3d836b6452533ad63082131baa2545301df9b0e2a93c17ac714eec4c28758)
+                mstore(0x20, frameDataLoad(settleIndex, 132)) // nf1
+                mstore(0x40, frameDataLoad(settleIndex, 164)) // nf2
+                mstore(0x60, frameDataLoad(settleIndex, 196)) // out1
+                mstore(0x80, frameDataLoad(settleIndex, 228)) // out2
+                mstore(0xa0, frameDataLoad(settleIndex, 260)) // publicAmount
+                mstore(0xc0, frameDataLoad(settleIndex, 324)) // recipient
+                mstore(0xe0, frameDataLoad(settleIndex, 292)) // fee
+                let structHash := keccak256(0, 0x100)
+                // keccak256("EIP712Domain(string name,uint256 chainId,address verifyingContract)")
+                // and keccak256("Minimal Shielded Pool")
+                mstore(0, 0x8cad95687ba82c2ce50e74f7b754645e5117c3a5bec8151c0726d5857980a866)
+                mstore(0x20, 0xc8951252be791158e1407343b9bdb1d51f9b4c1f34bb5b3dcfe7f863af63cf17)
+                mstore(0x40, chainid())
+                mstore(0x60, address())
+                let separator := keccak256(0, 0x80)
+                mstore(0, shl(240, 0x1901))
+                mstore(0x02, separator)
+                mstore(0x22, structHash)
+                digest := keccak256(0, 0x42)
+            }
+
             function impl() -> a {
                 codecopy(0, sub(codesize(), 64), 32)
                 a := and(mload(0), 0xffffffffffffffffffffffffffffffffffffffff)
@@ -108,9 +139,9 @@ object "ShieldedPoolDispatcher" {
                 a := and(mload(0), 0xffffffffffffffffffffffffffffffffffffffff)
             }
 
-            // Checks the statement in frame settleIndex's settle(Spend) call and the proof
-            // in this frame's calldata.
-            function verifyProof(settleIndex) {
+            // Checks the proof in this frame's calldata against the statement: frame
+            // settleIndex's settle(Spend) values, then the owner from its signature.
+            function verifyProof(settleIndex, owner) {
                 // settle((root,rootSlot,epoch,domain,nf1,nf2,out1,out2,
                 //         publicAmount,fee,recipient,authorizer)), one word each after the
                 // 4-byte selector.
@@ -175,7 +206,8 @@ object "ShieldedPoolDispatcher" {
                 // Hybrid compression (eprint 2025/1500): alpha = keccak256(statement) mod p,
                 // and gamma is the statement evaluated as a polynomial at alpha + beta,
                 // highest term first. The statement is written at 0x200, past the verifier
-                // call built at 0x80 below, which ends at 0x1e4.
+                // call built at 0x80 below, which ends at 0x1e4. The owner is a 20-byte
+                // signer, so it needs no range check.
                 let st := 0x200
                 mstore(st, nf1)
                 mstore(add(st, 0x20), nf2)
@@ -187,10 +219,11 @@ object "ShieldedPoolDispatcher" {
                 mstore(add(st, 0xe0), fee)
                 mstore(add(st, 0x100), recipient)
                 mstore(add(st, 0x120), authorizer)
-                let alpha := mod(keccak256(st, 0x140), p)
+                mstore(add(st, 0x140), owner)
+                let alpha := mod(keccak256(st, 0x160), p)
                 let sigma := addmod(alpha, beta, p)
                 let gamma := 0
-                for { let o := 0x140 } o { o := sub(o, 0x20) } {
+                for { let o := 0x160 } o { o := sub(o, 0x20) } {
                     gamma := addmod(mulmod(gamma, sigma, p), mload(add(st, sub(o, 0x20))), p)
                 }
 
@@ -213,12 +246,12 @@ object "ShieldedPoolDispatcher" {
                 // The pool is the sender. Three frames, or four with one generic DEFAULT
                 // tail; publicAmount does not force the fourth frame, since a withdrawal
                 // without one leaves withdrawalCredit for a later claim. This entry runs as
-                // frame 1, with one signature and no blobs.
+                // frame 1, with two signatures and no blobs.
                 if iszero(eq(txParam(0x02), address())) { fail(errShape()) }
                 let frames := txParam(0x09)
                 if iszero(or(eq(frames, 3), eq(frames, 4))) { fail(errShape()) }
                 if iszero(eq(txParam(0x0A), 1)) { fail(errShape()) }
-                if iszero(eq(txParam(0x0B), 1)) { fail(errShape()) }
+                if iszero(eq(txParam(0x0B), 2)) { fail(errShape()) }
                 if txParam(0x07) { fail(errShape()) }
                 // Two EIP-8250 nonce keys at sequence zero, which EIP-8250 requires a
                 // single-use key to authenticate: a key at sequence zero can be consumed
@@ -249,16 +282,23 @@ object "ShieldedPoolDispatcher" {
                 if frameParam(0, 0x08) { fail(errRoot()) }
                 if frameParam(0, 0x09) { fail(errRoot()) }
 
-                // The one signature: secp256k1 (scheme 1), from the proof's authorizer, with
+                // The first signature: secp256k1 (scheme 1), from the proof's authorizer, with
                 // an empty msg (0), so the protocol validated it, low-s, over the canonical
-                // signature hash of the whole transaction. Its length is not checked: the
-                // protocol fixes it at 65 bytes, and SIGPARAM exposes len(signature) for
-                // ARBITRARY entries only.
+                // signature hash of the whole transaction, which covers the second signature's
+                // bytes. Its length is not checked: the protocol fixes it at 65 bytes, and
+                // SIGPARAM exposes len(signature) for ARBITRARY entries only.
                 let authorizer := frameDataLoad(2, 356)
                 if or(iszero(authorizer), shr(160, authorizer)) { fail(errAuthorizer()) }
                 if iszero(eq(sigParam(0, 0), authorizer)) { fail(errAuthorizer()) }
                 if iszero(eq(sigParam(0, 1), 1)) { fail(errAuthorizer()) }
                 if sigParam(0, 2) { fail(errAuthorizer()) }
+
+                // The second signature: secp256k1, over the spend's EIP-712 intent as an
+                // explicit digest, which the protocol validated against its signer. That
+                // signer is the owner: the proof shows it is a leaf of the owner set the
+                // inputs belong to, so only that set's device can authorize the spend.
+                if iszero(eq(sigParam(1, 1), 1)) { fail(errOwner()) }
+                if iszero(eq(sigParam(1, 2), intentDigest(2))) { fail(errOwner()) }
 
                 // Frame 1: this proof-carrying VERIFY frame, targeting the pool, with flags 3
                 // (it may approve execution and payment), the 288-byte proof and zero value.
@@ -330,7 +370,7 @@ object "ShieldedPoolDispatcher" {
                 if iszero(eq(shr(192, frameDataLoad(0, 32)), rootSlot)) { fail(errRoot()) }
                 if iszero(eq(frameDataLoad(0, 40), frameDataLoad(2, 4))) { fail(errRoot()) }
 
-                verifyProof(2)
+                verifyProof(2, sigParam(1, 0))
                 // The pool pays the gas, so the proof's fee must cover the transaction's
                 // maximum cost (TXPARAM 0x06), or a spend could pay its gas out of other
                 // notes' value. Whatever the transaction does not use stays in the pool.

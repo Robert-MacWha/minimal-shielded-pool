@@ -284,6 +284,9 @@ export function maxCost(tx: FrameTx, blobBaseFee = 0n): bigint {
 
 // ---------- secp256k1 ----------
 
+/** The order n of secp256k1's group: private keys are in [1, n), and EIP-8141 takes s <= n/2. */
+export const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
+
 /**
  * A secp256k1 private key: 64 hex digits, with or without "0x", whose value is in [1, n). The
  * message never repeats the text, which is a secret.

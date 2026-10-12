@@ -1,7 +1,7 @@
 /**
  * src/poseidon.ts against circomlibjs, through the vectors tools/export-vectors.ts wrote from
- * it: 16 inputs each for Poseidon(2), Poseidon(3) and Poseidon(10), the pool's tagged hash
- * chain, and the empty depth-20 root. The circuit, the Solidity library and the client share
+ * it: 16 inputs each for Poseidon(2), Poseidon(3) and Poseidon(11), the pool's tagged hash
+ * chain, the empty depth-20 root and an owner set's root. The circuit, the Solidity library and the client share
  * these constants, so a mismatch here means the client computes notes the pool cannot match.
  * tools/export-vectors.ts and tools/poseidon-sol.ts must still write the committed vectors,
  * constants and Solidity libraries; that check needs forge on PATH. Runtime: about 1.5 s.
@@ -13,6 +13,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 
+import { OwnerSet } from "../src/owner.ts";
 import { poseidon } from "../src/poseidon.ts";
 import * as protocol from "../src/protocol.ts";
 
@@ -23,7 +24,7 @@ const vectors = JSON.parse(
   (_key, value) => (typeof value === "string" ? BigInt(value) : value),
 );
 
-for (const width of ["poseidon2", "poseidon3", "poseidon10"]) {
+for (const width of ["poseidon2", "poseidon3", "poseidon11"]) {
   test(`${width} matches circomlibjs`, () => {
     const cases: { in: bigint[]; out: bigint }[] = vectors[width];
     assert.equal(cases.length, 16);
@@ -35,13 +36,13 @@ for (const width of ["poseidon2", "poseidon3", "poseidon10"]) {
 
 test("the pool's hash chain matches circomlibjs", () => {
   const c: Record<string, bigint> = vectors.pool_chain;
-  const pk = tagged(TAG_PK, c.spend_key, 0n);
+  const pk = tagged(TAG_PK, c.owner_root, c.nk);
   const inner = p2(pk, c.rho);
   const cm = tagged(TAG_LEAF, inner, c.value);
   // The domain includes the input epoch, and the constrained Merkle index distinguishes
   // independently funded occurrences of the same commitment. The tag is the literal 4, as in
   // spend.circom, so the check does not rest on the library's own constant.
-  const nf = (leaf: bigint) => tagged(4n, p2(c.domain, c.spend_key), p2(leaf, c.index));
+  const nf = (leaf: bigint) => tagged(4n, p2(c.domain, c.nk), p2(leaf, c.index));
   assert.equal(pk, c.owner_pk, "owner_pk");
   assert.equal(inner, c.inner, "inner");
   assert.equal(cm, c.cm, "cm");
@@ -50,10 +51,19 @@ test("the pool's hash chain matches circomlibjs", () => {
   assert.equal(tagged(TAG_LEAF, c.out_inner1, c.out_value1), c.out_cm1, "out_cm1");
   assert.equal(tagged(TAG_LEAF, c.out_inner2, c.out_value2), c.out_cm2, "out_cm2");
   // The named helpers the wallet uses compose the same chain.
-  assert.equal(protocol.ownerPk(c.spend_key), c.owner_pk, "ownerPk()");
-  assert.equal(protocol.inner(c.spend_key, c.rho), c.inner, "inner()");
-  assert.equal(protocol.commitment(c.spend_key, c.rho, c.value), c.cm, "commitment()");
-  assert.equal(protocol.nullifier(c.domain, c.spend_key, c.cm, c.index), c.nf, "nullifier()");
+  assert.equal(protocol.ownerPk(c.owner_root, c.nk), c.owner_pk, "ownerPk()");
+  assert.equal(protocol.inner(c.owner_pk, c.rho), c.inner, "inner()");
+  assert.equal(protocol.commitment(c.owner_pk, c.rho, c.value), c.cm, "commitment()");
+  assert.equal(protocol.nullifier(c.domain, c.nk, c.cm, c.index), c.nf, "nullifier()");
+});
+
+test("an owner set's root matches circomlibjs, with empty leaves 0", () => {
+  const o = vectors.owner_set;
+  assert.equal(o.depth, protocol.OWNER_DEPTH);
+  let zero = 0n;
+  for (let d = 0; d < protocol.OWNER_DEPTH; d++) zero = p2(zero, zero);
+  assert.equal(zero, o.root_empty);
+  assert.equal(new OwnerSet(o.addresses).root, o.root);
 });
 
 test("the empty depth-20 root matches circomlibjs and protocol's EMPTY_ROOT", () => {

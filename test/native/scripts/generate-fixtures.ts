@@ -10,22 +10,28 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 
+import { p256 } from "@noble/curves/nist.js";
+
 import { compareBigint, concat, fromHex, hex32, hexPadded, keccak } from "../../../src/bytes.ts";
 import { toBigint, toBytes, toHex, word } from "../../../src/bytes.ts";
 import { parseArgs, runCli } from "../../../src/cli/args.ts";
 import { GeneratorError } from "../../../src/errors.ts";
 import { spendEntry, type Proved } from "../../../src/fixtures.ts";
-import { addressOf, APPROVE, ATOMIC_BATCH, MODE, rawTx } from "../../../src/frametx.ts";
+import { addressOf, APPROVE, ATOMIC_BATCH, MODE, rawTx, SCHEME } from "../../../src/frametx.ts";
 import { rlpBytes, rlpInt, rlpList, sigHash } from "../../../src/frametx.ts";
 import { signHash, totalGasLimit, type Frame, type FrameTx } from "../../../src/frametx.ts";
+import type { FrameSig } from "../../../src/frametx.ts";
 import * as gas from "../../../src/gas.ts";
 import { canonical, isObject, parse, stringify } from "../../../src/json.ts";
+import { OwnerSet, SoftwareOwner, type IndexedLeaf, type OwnerSigner } from "../../../src/owner.ts";
 import * as protocol from "../../../src/protocol.ts";
 import { prove, terminate, verify, WASM, ZKEY } from "../../../src/prover.ts";
 import { seededRng } from "../../../src/random.ts";
 import {
   defaultClaimTail,
   entryProofBytes,
+  ownerSignature,
+  parseSpend,
   settleCalldata,
   shieldCalldata,
   signTransaction,
@@ -44,6 +50,12 @@ const KEY = word(0xd3e10n);
 const DEPLOYER = addressOf(KEY);
 const [EOA, REJECTOR] = [0xcafebaben, 0xdeadn];
 const ATTACKER = word(0xa77ac4e5n);
+const P256_N = p256.Point.Fn.ORDER;
+// One software owner holds every note's owner set and signs each spend with a fresh leaf.
+const OWNER = new SoftwareOwner(
+  keccak(new TextEncoder().encode("minimal-shielded-pool:native-owner")),
+  64,
+);
 
 const addr = (x: bigint) => hexPadded(x, 40);
 const utf8 = (text: string) => new TextEncoder().encode(text);
@@ -61,8 +73,9 @@ const TEST_NOTES = toHex(repeat(TEST_NOTE, 2));
 const CIPHERTEXT = repeat(keccak(utf8("minimal-shielded-pool:native-test-ciphertext")), 34);
 const FIRST_PAYMENT_NOTES = toHex(concat(CIPHERTEXT, TEST_NOTE, TEST_NOTE));
 
-// The ten statement values in the order the proof binds them, and each one's word in the
-// settlement calldata: the selector, then protocol.SPEND_FIELDS, matched ignoring case.
+// The ten statement values the settlement calldata carries, in the order the proof binds them,
+// and each one's word there: the selector, then protocol.SPEND_FIELDS, matched ignoring case.
+// The eleventh, the owner, is the owner signature's signer.
 const STATEMENT =
   "nf1 nf2 out-cm1 out-cm2 root domain public-amount fee recipient authorizer".split(" ");
 const settleWord = (value: string) =>
@@ -134,6 +147,11 @@ interface SpendOptions {
   slot?: bigint;
   rejected?: boolean;
   error?: string;
+  /**
+   * The signatures after the authorizer's, from the entry and the settlement calldata the spend
+   * carries: by default the entry's owner signature alone.
+   */
+  owners?: (entry: Entry, settle: Uint8Array) => FrameSig[];
   /** The withdrawal leaves credit instead of paying out. */
   failedClaim?: boolean;
   paid?: bigint;
@@ -145,8 +163,9 @@ interface SpendOptions {
 }
 
 /**
- * A spend as the wallet builds it, changed by `mutate` and signed by the entry's authorizer.
- * Nothing is checked, so an invalid spend still builds.
+ * A spend as the wallet builds it, changed by `mutate`, with the entry's owner signature (or
+ * what `owners` makes of it) and signed by the entry's authorizer. Nothing is checked beyond the
+ * owner signature, so an invalid spend still builds.
  */
 function frameTx(entry: Entry, o: SpendOptions = {}): FrameTx {
   const source = protocol.sourceId(POOL, int(entry, "epoch"));
@@ -169,7 +188,23 @@ function frameTx(entry: Entry, o: SpendOptions = {}): FrameTx {
     maxBlobFee: 0n,
     blobHashes: [],
   };
-  return signTransaction(tx, fromHex(entry.authorizer_private_key, "authorizer key"));
+  const key = fromHex(entry.authorizer_private_key, "authorizer key");
+  const owners = o.owners ?? ((e) => [honestOwner(e)]);
+  return signTransaction(tx, key, ...owners(entry, frames[2].data));
+}
+
+/** The owner signature a fixture entry records, as the wallet sends it. */
+const honestOwner = (entry: Entry) => ownerSignature(entry, CHAIN, POOL);
+
+/**
+ * The entry's owner leaf signing the intent of the settlement calldata as it stands, changed or
+ * aliased words included. A case that changes a statement value the intent covers uses it, so
+ * that only the proof or a range check can refuse the spend.
+ */
+function resigned(entry: Entry, settle: Uint8Array): FrameSig[] {
+  const msg = protocol.intentDigest(CHAIN, POOL, protocol.decodeSettle(settle)!.spend);
+  const signature = OWNER.sign(Number(entry.owner_leaf), msg);
+  return [{ scheme: SCHEME.SECP256K1, signer: int(entry, "owner"), msg, signature }];
 }
 
 /** A DEFAULT frame that moves no value. */
@@ -254,11 +289,14 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     save(`deploy-${NAMES[i]}`, ordinary(BigInt(i), null, code)),
   );
 
-  const note = (value: bigint) => {
-    const [sk, rho] = newNote(rng);
-    const inner = protocol.inner(sk, rho);
-    return { sk, rho, value, inner, cm: protocol.commitment(sk, rho, value) };
+  /** A note of `value` wei in the owner set `owners`. */
+  const noteIn = (owners: OwnerSet, value: bigint) => {
+    const [nk, rho] = newNote(rng);
+    const pk = protocol.ownerPk(owners.root, nk);
+    const inner = protocol.inner(pk, rho);
+    return { nk, rho, value, inner, cm: protocol.commitment(pk, rho, value) };
   };
+  const note = (value: bigint) => noteIn(OWNER.set, value);
   type Note = ReturnType<typeof note>;
   const [NA, NB, NC, ND] = [eth(100n), eth(95n), eth(70n), eth(60n)].map(note);
   const BASE = treeOf(NA.cm, NB.cm);
@@ -303,6 +341,12 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     notes?: string;
     /** Proves against alpha over this statement value plus P; see the alias cases. */
     alias?: number;
+    /** Reveals this owner leaf instead of OWNER's next one. */
+    owner?: IndexedLeaf;
+    /** Holds the leaf's key, by default OWNER. */
+    device?: OwnerSigner;
+    /** Spends beside this dummy instead of a fresh one. */
+    dummy?: protocol.SpendInput;
   }
 
   /** Draws a spend's dummy input and authorizer, then proves it or reads its cached proof. */
@@ -311,18 +355,20 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     const publicAmount = n.value - FEE - outputs.reduce((sum, [, v]) => sum + v, 0n);
     assert(publicAmount >= 0n, `${name} spends more than its input`);
     const recipient = publicAmount === 0n ? 0n : (o.recipient ?? EOA);
-    const inputs = [{ sk: n.sk, rho: n.rho, value: n.value, idx: i }, dummyInput(rng)];
+    const inputs = [{ nk: n.nk, rho: n.rho, value: n.value, idx: i }, o.dummy ?? dummyInput(rng)];
     const [authorizerKey, authorizer] = newAuthorizer(rng);
+    const owner = o.owner ?? OWNER.nextLeaf();
     const domain = protocol.domainScalar(CHAIN, POOL, epoch);
-    const terms = { authorizer, publicAmount, fee: FEE, recipient };
+    const terms = { authorizer, owner, publicAmount, fee: FEE, recipient };
     const witness = buildWitness(tree, inputs, outputs, domain, terms);
     let stmt: bigint[] | undefined;
     if (alias !== undefined) {
       // An honest witness proved against alpha over an aliased word, the statement value plus
       // P. gamma reduces the word modulo P, so only the pool's range checks tell them apart.
-      const [nf1, nf2] = protocol.inputNullifiers(domain, inputs);
+      const [nf1, nf2] = protocol.inputNullifiers(domain, owner.root, inputs);
       const [outCm1, outCm2] = protocol.outputCommitments(outputs);
-      stmt = protocol.statement({ nf1, nf2, outCm1, outCm2, root: tree.root(), domain, ...terms });
+      const values = { publicAmount, fee: FEE, recipient, authorizer, owner: owner.address };
+      stmt = protocol.statement({ nf1, nf2, outCm1, outCm2, root: tree.root(), domain, ...values });
       const words = stmt.map((x, j) => (j === alias ? x + P : x));
       witness.alpha = String(toBigint(keccak(concat(...words.map(word)))) % P);
     }
@@ -336,7 +382,8 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
       proved = { ...proved, publics: [beta, gamma, alpha] };
     }
     const extra = { root_slot: String(rootSlot), notes: o.notes ?? TEST_NOTES };
-    const entryTerms = { ...terms, epoch, authorizerKey };
+    const signing = { device: o.device ?? OWNER, chainId: CHAIN, pool: POOL };
+    const entryTerms = { ...terms, ...signing, epoch, authorizerKey };
     const entry: Entry = spendEntry(tree, domain, inputs, outputs, entryTerms, proved, extra);
     return (entries[name] = entry);
   }
@@ -409,6 +456,21 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     deposit("append-after-spend", NC, NEXT, later, 102n),
     publish("publish-after-spend", NEXT + 1n, 0n, 102n),
     spend("replay-later-root", replay, replayed),
+  ]);
+  // The same spend proved again against a later root, beside the same dummy input and with the
+  // same owner leaf, has the same nullifiers and outputs. Its intent omits the root, so the
+  // owner's signature carries over unchanged and the wallet needs no new one.
+  const [, recorded] = initial.inputs as { nk: string; rho: string }[];
+  const dummy = { nk: BigInt(recorded.nk), rho: BigInt(recorded.rho), value: 0n, idx: null };
+  const sameLeaf = OWNER.set.leaf(Number(initial.owner_leaf));
+  const again = { rootSlot: 102n, owner: sameLeaf, dummy };
+  const reproof = await proveSpend("reproof-later-root", later, NA, 0n, again);
+  assert(reproof.nf2 === initial.nf2, "the re-proof has another dummy nullifier");
+  assert(initial.owner_signature === reproof.owner_signature, "a re-proof needs a new signature");
+  addCase("reproof-against-later-root-keeps-owner-signature", [
+    deposit("append-before-reproof", NC, NEXT, later, 102n),
+    publish("publish-before-reproof", NEXT + 1n, 0n, 102n),
+    spend("withdraw-with-reproof", reproof, { slot: 103n, ...paidA }),
   ]);
 
   const badDomain = { ...initial, domain: hex32(protocol.domainScalar(CHAIN, POOL, 1n)) };
@@ -640,23 +702,32 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     addCase(`validation-limit-raised-beyond-fee-${label}`, [step]);
   }
 
-  // Hybrid compression: the proof binds the ten statement values through alpha and gamma, which
-  // the pool recomputes from the settlement calldata, and through beta, which follows the proof
-  // in frame 1, so changing any one of them fails the pool's VERIFY frame. nf1 and nf2 change in
-  // the entry so the EIP-8250 keys follow, and the authorizer case re-signs the proof with an
+  // Hybrid compression: the proof binds the ten statement values in the settlement calldata
+  // through alpha and gamma, which the pool recomputes, and through beta, which follows the
+  // proof in frame 1, so changing any one of them fails the pool's VERIFY frame. The owner signs
+  // each changed intent again, so only the proof check can refuse it. nf1 and nf2 change in the
+  // entry so the EIP-8250 keys follow, and the authorizer case re-signs the proof with an
   // attacker's key, so all three reach the proof check. root and domain are refused earlier by
   // exact checks (old-branch-proof-current-root-rejected and old-proof-rebound-epoch take changed
-  // ones to the verifier). The dispatcher and the verifier both refuse a beta outside the field.
+  // ones to the verifier). The eleventh value, the owner, is the owner signature's signer, which
+  // owner-signature-by-a-key-outside-the-set changes. The dispatcher and the verifier both refuse
+  // a beta outside the field.
   const stolen: Entry = { ...initial, authorizer: addr(addressOf(ATTACKER)) };
   stolen.authorizer_private_key = toHex(ATTACKER);
+  const resign = { owners: resigned };
   for (const value of STATEMENT) {
     const name = `changed-${value}`;
     const step =
       value === "authorizer"
-        ? refused(name, stolen)
+        ? refused(name, stolen, undefined, resign)
         : value.startsWith("nf")
-          ? refused(name, { ...initial, [value]: hex32(int(initial, value) + 1n) })
-          : refused(name, initial, bumpWord(2, settleWord(value)));
+          ? refused(
+              name,
+              { ...initial, [value]: hex32(int(initial, value) + 1n) },
+              undefined,
+              resign,
+            )
+          : refused(name, initial, bumpWord(2, settleWord(value)), resign);
     addCase(`compression-statement-${value}-changed-rejected`, [step]);
   }
   const betaStep = refused("changed-beta", initial, bumpWord(1, 256));
@@ -723,10 +794,12 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     spend("withdraw-output-after-later-publication", epochOutput, { slot: 104n, ...paidOut1 }),
   ]);
 
-  // The pool's range checks are load-bearing: the verifier no longer sees the ten values. Each
+  // The pool's range checks are load-bearing: the verifier no longer sees the statement. Each
   // case proves an honest withdrawal against alpha over one value plus P, with the nonce keys
-  // following, so only the range check can refuse it before approval. root, domain and the
-  // authorizer are pinned by exact checks instead. entries.json holds the changed entries.
+  // following, and the owner signs the aliased intent, as an owner who wanted the pool to pay
+  // for a settlement bound to revert could, so only the range check can refuse it before
+  // approval. root, domain and the authorizer are pinned by exact checks instead, and the owner
+  // is a signer's address. entries.json holds the changed entries.
   for (const [alias, value] of STATEMENT.entries()) {
     if (["root", "domain", "authorizer"].includes(value)) continue;
     const aliased = await proveSpend(`alias-${value}`, BASE, NA, 0n, { alias });
@@ -738,7 +811,7 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
       aliased[key] = key === "public_amount" || key === "fee" ? String(moved) : hex32(moved);
     }
     const mutate = value === "recipient" ? bumpWord(2, settleWord(value), P) : undefined;
-    const step = refused(`aliased-${value}`, aliased, mutate);
+    const step = refused(`aliased-${value}`, aliased, mutate, resign);
     addCase(`compression-${value}-aliased-by-p-rejected`, [step]);
   }
 
@@ -760,9 +833,90 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   addCase("signature-rewrapped-as-explicit-message-rejected", [rewrapped]);
   // A signature by another key, here the attacker's own over another fourth frame, would let
   // anyone who sees a pending spend choose its tail and fees.
-  const other = signTransaction(frameTx(initial, { mutate: setTail }), ATTACKER);
+  const other = signTransaction(
+    frameTx(initial, { mutate: setTail }),
+    ATTACKER,
+    honestOwner(initial),
+  );
   const otherKey = refused("signature-other-key", initial, undefined, { raw: rawTx(other) });
   addCase("signature-by-another-key-rejected", [otherKey]);
+
+  // The owner's signature. Each case changes only the signatures of a valid spend, so the pool
+  // must refuse it in VERIFY frame 1, before approval. A spend without the owner's signature,
+  // or with a third signature, has another shape. A signature over another intent, over the
+  // same intent for another pool, or over the transaction hash does not carry the spend's
+  // intent digest. The intent signed by a key outside the owner set makes that key the owner,
+  // which the proof does not name. The owner signs second, after the authorizer.
+  const authorizerKey = fromHex(initial.authorizer_private_key, "authorizer key");
+  const leaf = Number(initial.owner_leaf);
+  const intent = parseSpend(initial, 0n);
+  const signed = (msg: Uint8Array, key?: Uint8Array): FrameSig => ({
+    scheme: SCHEME.SECP256K1,
+    signer: key === undefined ? int(initial, "owner") : addressOf(key),
+    msg,
+    signature: key === undefined ? OWNER.sign(leaf, msg) : signHash(msg, key),
+  });
+  const otherIntent = protocol.intentDigest(CHAIN, POOL, { ...intent, fee: intent.fee + 1n });
+  const otherPool = protocol.intentDigest(CHAIN, DEPLOYER, intent);
+  for (const [label, owners] of [
+    ["missing", () => []],
+    ["repeated", (e: Entry) => [honestOwner(e), honestOwner(e)]],
+    ["over-another-intent", () => [signed(otherIntent)]],
+    ["for-another-pool", () => [signed(otherPool)]],
+    ["by-a-key-outside-the-set", (e: Entry) => [signed(honestOwner(e).msg, ATTACKER)]],
+  ] as const) {
+    addCase(`owner-signature-${label}-rejected`, [
+      refused(`owner-signature-${label}`, initial, undefined, { owners }),
+    ]);
+  }
+  const empty = new Uint8Array(0);
+  const overHash = frameTx(initial, {
+    owners: (e) => [{ ...honestOwner(e), msg: empty, signature: empty }],
+  });
+  overHash.signatures[1].signature = OWNER.sign(leaf, sigHash(overHash));
+  const hashStep = refused("owner-signature-over-transaction-hash", initial, undefined, {
+    raw: rawTx(overHash),
+  });
+  addCase("owner-signature-over-transaction-hash-rejected", [hashStep]);
+  const swapped = frameTx(initial);
+  const [authorizerSig, ownerSig] = swapped.signatures;
+  swapped.signatures = [ownerSig, { ...authorizerSig, signature: empty }];
+  swapped.signatures[1].signature = signHash(sigHash(swapped), authorizerKey);
+  const swappedStep = refused("owner-signature-first", initial, undefined, {
+    raw: rawTx(swapped),
+  });
+  addCase("owner-signature-before-authorizer-rejected", [swappedStep]);
+
+  // A P-256 owner: the protocol validates its signature, and its address is a leaf of the
+  // owner set its note belongs to, but the pool takes secp256k1 owners only, so every spend
+  // has one shape.
+  const p256Key = word(
+    1n + (toBigint(keccak(utf8("minimal-shielded-pool:native-p256-owner"))) % (P256_N - 1n)),
+  );
+  const p256Point = p256.getPublicKey(p256Key, false).subarray(1);
+  const p256Set = new OwnerSet([toBigint(keccak(p256Point).subarray(12))]);
+  const p256Device = {
+    sign: (_: number, digest: Uint8Array) =>
+      concat(p256.sign(digest, p256Key, { prehash: false, lowS: true }), p256Point),
+  };
+  const NP = noteIn(p256Set, eth(80n));
+  const p256Tree = treeOf(NA.cm, NB.cm, NP.cm);
+  const p256Proving = { owner: p256Set.leaf(0), device: p256Device, rootSlot: 101n };
+  const p256Entry = await proveSpend("p256-owner", p256Tree, NP, 2n, p256Proving);
+  const p256Owner = (e: Entry): FrameSig[] => [
+    {
+      scheme: SCHEME.P256,
+      signer: int(e, "owner"),
+      msg: protocol.intentDigest(CHAIN, POOL, parseSpend(e, 0n)),
+      signature: fromHex(e.owner_signature, "the P-256 owner signature", 128),
+    },
+  ];
+  const p256Steps = [
+    deposit("deposit-p256-note", NP, NEXT, p256Tree, 101n),
+    publish("publish-p256-note", NEXT + 1n, 0n, 101n),
+    refused("owner-signature-p256", p256Entry, undefined, { owners: p256Owner, slot: 102n }),
+  ];
+  addCase("owner-signature-p256-rejected", p256Steps);
   // A DEFAULT settlement frame would run after approval, revert on its sender check and leave
   // the input keys consumed.
   const defaultMode = refused("settlement-default-mode", initial, set(2, { mode: MODE.DEFAULT }));

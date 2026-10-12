@@ -28,16 +28,16 @@ const PRE_PR_12279_KEYED_NONCE_EXECUTION_GAS = 2n * 20_000n;
 // Measured on a devnet running EIP-8250 at f3079a09e8 and EIP-8272 at 824cbc0b0e, the
 // ten-input verifier's proof frame used up to 255,011; the drop from the pre-12279 figure is
 // the keyed-nonce first use leaving the execution dimension for the state one. Hybrid
-// compression cuts the verifier to three public inputs: on native ethrex 247e2dd2 the proof
-// frame uses 210,049, plus 90 with a fourth frame and 27 when nf1 > nf2 (the dispatcher sorts
-// the nonce keys), so at most 210,166.
-const POST_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 210_166n;
+// compression cuts the verifier to three public inputs, and the owner's intent digest adds
+// about 610: on native ethrex 247e2dd2 the proof frame uses 210,659, plus 90 with a fourth
+// frame and 27 when nf1 > nf2 (the dispatcher sorts the nonce keys), so at most 210,776.
+const POST_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 210_776n;
 // The proof frame needs a larger limit than it uses. Each nested call keeps back 1/64 of the
 // gas it could forward (EIP-150), once from the dispatcher to the verifier and once from the
 // verifier to the pairing precompile. On native ethrex 247e2dd2 the heaviest spend (a fourth
-// frame and nf1 > nf2) needs a limit of 216,141; 216,140 fails. Below that the verifier runs
+// frame and nf1 > nf2) needs a limit of 216,751; 216,750 fails. Below that the verifier runs
 // out of gas and the dispatcher reports an invalid proof.
-const MIN_WORKING_VERIFY_FRAME_GAS = 216_141n;
+const MIN_WORKING_VERIFY_FRAME_GAS = 216_751n;
 // The pool grammar permits exactly one 72-byte recent-root tuple, pinned by the dispatcher's
 // `frameParam(0, 0x04) == 72`; that shape's verifier frame measured 5,579 gas, under the
 // 8,000-gas wallet default. The figure says nothing about the sixteen tuples EIP-8272 allows:
@@ -136,9 +136,11 @@ export function checkGasProfile(root = ROOT): string {
   }
   // EIP-8272: the recent-root verifier frame joins the public mempool's verify budget and the
   // prefix's state budgets stay under EIP-8141's MAX_VERIFY_STATE_GAS. One tuple costs the
-  // predeploy's cold entry plus two keccaks and a cold SLOAD, under the wallet default.
-  if (gas.REQUIRED_VERIFY_BUDGET !== gas.RECENT_ROOT_FRAME_GAS + gas.VERIFY_FRAME_GAS + 2_800n) {
-    throw new CheckError("REQUIRED_VERIFY_BUDGET is not the two prefix frames plus the signature");
+  // predeploy's cold entry plus two keccaks and a cold SLOAD, under the wallet default. Each of
+  // the two secp256k1 signatures, the authorizer's and the owner's, costs 2,800.
+  const frames = gas.RECENT_ROOT_FRAME_GAS + gas.VERIFY_FRAME_GAS;
+  if (gas.SPEND_SIGNATURES !== 2n || gas.REQUIRED_VERIFY_BUDGET !== frames + 2n * 2_800n) {
+    throw new CheckError("REQUIRED_VERIFY_BUDGET is not the two prefix frames plus two signatures");
   }
   if (gas.REQUIRED_VERIFY_BUDGET > gas.HEGOTA_TESTNET_MAX_VERIFY_GAS) {
     throw new CheckError("REQUIRED_VERIFY_BUDGET exceeds the testnet's verify budget");
@@ -171,6 +173,8 @@ export function checkGasProfile(root = ROOT): string {
   if (!pins.every((pin) => dispatcher.includes(pin))) {
     throw new CheckError("dispatcher gas limits differ from src/gas.ts");
   }
+  const signatures = `if iszero(eq(txParam(0x0B), ${gas.SPEND_SIGNATURES})) ${shapeError}`;
+  check(dispatcher.includes(signatures), "dispatcher signature count differs from src/gas.ts");
   // The settlement frame admits exactly settle(Spend) plus either note length, and the gas
   // bound above charges the larger.
   const [short, long] = gas.SETTLE_FRAME_DATA_BYTES;

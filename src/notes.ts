@@ -21,21 +21,26 @@
  * so a sender keeps fewer than LOOKAHEAD payments past the last one it has seen final.
  *
  * K, the secret a sender and recipient share, comes from the recipient's public address (a
- * version byte, owner_pk and an ML-KEM-768 encapsulation key): the payment that opens the channel
- * carries its 1,088-byte ciphertext, and no other transaction does, since two carrying it would
- * be linked. Or the recipient issues K = PRF(root, "direct", n), for the next number n, to one
- * sender over a post-quantum channel; n stays within GAP of the highest number paid, which is how
- * far a scan from the seed looks. Change and shields from one's own funds use K = PRF(root,
- * "self"), and a withdrawal puts a random dummy in the payee note.
+ * version byte, owner_pk and an ML-KEM-768 encapsulation key): the payment that opens the
+ * channel carries its 1,088-byte ciphertext, and no other transaction does, since two carrying
+ * it would be linked. Version 2 names an owner key over an owner set, so a sender refuses a
+ * version 1 address, whose notes no owner set could spend. Or the recipient issues K =
+ * PRF(root, "direct", n), for the next number n, to one sender over a post-quantum channel; n
+ * stays within GAP of the highest number paid, which is how far a scan from the seed looks.
+ * Change and shields from one's own funds use K = PRF(root, "self"), and a withdrawal puts a
+ * random dummy in the payee note.
  *
- * A recipient rebuilds every incoming note, and every change note, from its seed alone. A sender
- * cannot recompute a secret it encapsulated, so after a restore it opens a new channel with each
- * recipient, and resumes its self channel with selfChannel(). Direct secrets and the self channel
- * do not depend on the deployment, so a seed is used with one pool only.
+ * A recipient rebuilds every incoming note, and every change note, from its seed and its owner
+ * set's root. A sender cannot recompute a secret it encapsulated, so after a restore it opens a
+ * new channel with each recipient, and resumes its self channel with selfChannel(). Direct
+ * secrets and the self channel do not depend on the deployment, so a seed is used with one pool
+ * only.
  *
- * All notes paid to one address share its spend key. A disclosure receipt for one of them
- * reveals Poseidon2(D, spend_key), which identifies every spend of that address in epoch D, so
- * src/disclosure.ts refuses such a receipt unless asked for it explicitly.
+ * An address's owner key commits to its device's owner set and to a nullifier key nk the seed
+ * derives (protocol.ownerPk), so the seed finds and proves the address's notes, but only the
+ * device can authorize their spends. All notes paid to one address share its nk. A disclosure
+ * receipt for one of them reveals Poseidon2(D, nk), which identifies every spend of that address
+ * in epoch D, so src/disclosure.ts refuses such a receipt unless asked for it explicitly.
  */
 import * as crypto from "node:crypto";
 
@@ -63,7 +68,7 @@ export const TAG_BYTES = 16;
 const VALUE_BYTES = 16;
 export const SECRET_BYTES = 32;
 const EK_BYTES = 1184;
-const ADDRESS_VERSION = 1;
+const ADDRESS_VERSION = 2;
 export const ADDRESS_BYTES = 1 + 32 + EK_BYTES;
 export const MIN_SEED_BYTES = 32;
 export const GAP = 20;
@@ -153,11 +158,6 @@ export function shieldNotes(note: Uint8Array, ciphertext = EMPTY): Uint8Array {
   return data;
 }
 
-/** cm of an output paid to owner (protocol.commitment takes a spend key instead). */
-export function outputCommitment(owner: bigint, rho: bigint, value: bigint): bigint {
-  return protocol.tagged(protocol.TAG_LEAF, protocol.p2(owner, rho), value);
-}
-
 // ---- keys and addresses ----
 
 /** The bytes of hex with or without "0x", as a person pastes a seed or an address. */
@@ -217,6 +217,12 @@ export class Address {
   static decode(data: string | Uint8Array): Address {
     if (typeof data === "string") data = pastedHex(data, "an address");
     if (!(data instanceof Uint8Array)) throw new NotesError("an address is hex or bytes");
+    if (data.length === ADDRESS_BYTES && data[0] === 1) {
+      throw new NotesError(
+        "a version 1 address predates owner sets, so no one could spend a payment to it; ask " +
+          "the recipient for a new address",
+      );
+    }
     if (data.length !== ADDRESS_BYTES || data[0] !== ADDRESS_VERSION) {
       throw new NotesError(
         `an address is ${ADDRESS_BYTES} bytes starting with version ${ADDRESS_VERSION}`,
@@ -232,25 +238,33 @@ export class Address {
   }
 }
 
-/** One address's keys, all derived from the wallet seed. */
+/**
+ * One address's keys: its secrets, derived from the wallet seed, and the root of the owner set
+ * whose device authorizes its spends.
+ */
 export class WalletKeys {
   readonly account: bigint;
   readonly root: Uint8Array;
-  readonly spendKey: bigint;
+  readonly ownerRoot: bigint;
+  readonly nk: bigint;
   readonly ownerPk: bigint;
   readonly selfSecret: Uint8Array;
   readonly #kem: crypto.KeyObject;
 
-  constructor(seed: Uint8Array, account = 0n) {
+  constructor(seed: Uint8Array, ownerRoot: bigint, account = 0n) {
     if (seed.length < MIN_SEED_BYTES) {
       throw new NotesError(`a seed has at least ${MIN_SEED_BYTES} bytes`);
+    }
+    if (!(ownerRoot > 0n && ownerRoot < P)) {
+      throw new NotesError("an owner set's root is a nonzero field element");
     }
     if (account < 0n) throw new NotesError("an account number is nonnegative");
     this.account = account;
     this.root = prf(seed, "account", account);
-    this.spendKey = prfField(this.root, "spend");
-    if (this.spendKey === 0n) throw new NotesError("degenerate spend key");
-    this.ownerPk = protocol.ownerPk(this.spendKey);
+    this.ownerRoot = ownerRoot;
+    this.nk = prfField(this.root, "nullifier");
+    if (this.nk === 0n) throw new NotesError("degenerate nullifier key");
+    this.ownerPk = protocol.ownerPk(ownerRoot, this.nk);
     // FIPS 203's 64-byte seed (d || z) regenerates the same key pair in any library.
     const key = Buffer.concat([PKCS8_SEED, prf(this.root, "kem-d"), prf(this.root, "kem-z")]);
     try {

@@ -1,11 +1,12 @@
 /**
  * What the fixture generators share: the spend entry each proof becomes, and the rules that keep
- * a fixture's secrets. A fixture holds the only openings of its notes and the one-time
- * authorizer keys of its spends, so it is written readable by its owner only, and no run
- * replaces a file at its output path unless that file is a fixture for the test chain, since
- * any other may hold the only openings of unspent notes. By default a fixture goes under
- * artifacts/, which git ignores, except that a smoke fixture for the test chain and pool
- * replaces the committed one; --output can name any path, the committed fixture included.
+ * a fixture's secrets. A fixture holds the only openings of its notes, the one-time authorizer
+ * keys of its spends and the seeds of the software owners that stand in for its wallets'
+ * devices, so it is written readable by its owner only, and no run replaces a file at its output
+ * path unless that file is a fixture for the test chain, since any other may hold the only
+ * openings of unspent notes. By default a fixture goes under artifacts/, which git ignores,
+ * except that a smoke fixture for the test chain and pool replaces the committed one; --output
+ * can name any path, the committed fixture included.
  */
 import assert from "node:assert/strict";
 import { mkdirSync, readlinkSync } from "node:fs";
@@ -23,6 +24,7 @@ import {
   type FileIdentity,
 } from "./files.ts";
 import { isObject, stringify } from "./json.ts";
+import type { IndexedLeaf, OwnerSigner } from "./owner.ts";
 import * as protocol from "./protocol.ts";
 import type { ProofWords } from "./prover.ts";
 import type { MerkleTree, SpendTerms, Witness } from "./wallet.ts";
@@ -152,17 +154,28 @@ export function writeFixture(path: string, fixture: object, previous: FileIdenti
   }
 }
 
-/** A spend's public terms, its epoch and its one-time authorizer's private key. */
+/** The owner set leaves a fixture wallet's software owner holds; each signs one spend. */
+export const OWNER_LEAVES = 4;
+
+/**
+ * A spend's public terms; its epoch; its one-time authorizer's private key; the owner set leaf it
+ * reveals, and the device holding that leaf's key, which signs the spend's intent for the pool at
+ * `pool` on chain `chainId`.
+ */
 interface EntryTerms extends SpendTerms {
   epoch: bigint;
   authorizerKey: Uint8Array;
+  owner: IndexedLeaf;
+  device: OwnerSigner;
+  chainId: bigint;
+  pool: bigint;
 }
 
 /**
- * A fixture's spend entry: the statement values, the authorizer key, the proof, and the openings
- * of both inputs, dummy included, followed by `extra`. If another deposit changes the tree
- * first, the notes must be proved again against a newer root, and nothing else keeps these
- * secrets.
+ * A fixture's spend entry: the statement values, the authorizer key, the owner's signature, the
+ * proof, and the openings of both inputs, dummy included, followed by `extra`. If another deposit
+ * changes the tree first, the notes must be proved again against a newer root, and nothing else
+ * keeps these secrets; the owner's signature still holds, since the intent omits the root.
  */
 export function spendEntry(
   tree: MerkleTree,
@@ -173,14 +186,15 @@ export function spendEntry(
   { publics, proof }: Proved,
   extra: Record<string, unknown>,
 ) {
-  const { epoch, authorizer, publicAmount = 0n, fee = 0n, recipient = 0n } = terms;
+  const { epoch, authorizer, owner, publicAmount = 0n, fee = 0n, recipient = 0n } = terms;
   const root = tree.root();
-  const [nf1, nf2] = protocol.inputNullifiers(domain, inputs);
+  const [nf1, nf2] = protocol.inputNullifiers(domain, owner.root, inputs);
   const [outCm1, outCm2] = protocol.outputCommitments(outputs);
-  // The crux: the proof's public signals compress exactly the wallet's own ten statement
+  // The crux: the proof's public signals compress exactly the wallet's own eleven statement
   // values, recomputed here as the pool recomputes them.
   const hashes = { nf1, nf2, outCm1, outCm2, root, domain };
-  const stmt = protocol.statement({ ...hashes, publicAmount, fee, recipient, authorizer });
+  const values = { publicAmount, fee, recipient, authorizer, owner: owner.address };
+  const stmt = protocol.statement({ ...hashes, ...values });
   const [beta, gamma, alpha] = publics;
   const { compressionAlpha, compressionBeta, fingerprint, P } = protocol;
   assert(alpha === compressionAlpha(stmt), "proof alpha does not hash the wallet's statement");
@@ -189,6 +203,11 @@ export function spendEntry(
   assert(
     gamma === fingerprint(sigma, stmt),
     "proof gamma does not fingerprint the wallet's statement",
+  );
+  const intent = { nf1, nf2, outCm1, outCm2, publicAmount, recipient, fee };
+  const signature = terms.device.sign(
+    owner.index,
+    protocol.intentDigest(terms.chainId, terms.pool, intent),
   );
   return {
     root: hex32(root),
@@ -203,10 +222,14 @@ export function spendEntry(
     recipient: hexPadded(recipient, 40),
     authorizer: hexPadded(authorizer, 40),
     authorizer_private_key: toHex(terms.authorizerKey),
+    owner: hexPadded(owner.address, 40),
+    owner_leaf: owner.index,
+    owner_signature: toHex(signature),
     beta: hex32(beta),
     proof,
     inputs: inputs.map((i) => ({
-      spend_key: hex32(i.sk),
+      owner_root: hex32(owner.root),
+      nk: hex32(i.nk),
       rho: hex32(i.rho),
       value: String(i.value),
       leaf: i.idx,

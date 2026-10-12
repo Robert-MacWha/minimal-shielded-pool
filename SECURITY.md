@@ -14,11 +14,15 @@ clients and a proof that settlement fits each fork's gas schedule.
    waste and could forge spends that drain any pool using this key. Hold no
    real value in such a pool; a real one needs the setup under
    [Assumptions](#assumptions).
-2. **Secrets live in files that nothing backs up.** A fixture holds the only
-   openings of its notes and the authorizer keys of its spends, and a wallet
-   seed derives the spend key of every address it makes. Losing a fixture
-   loses its unspent notes, and anyone who reads a fixture or seed can spend
-   them. Back them up, keep them readable by their owner only, and keep a
+2. **Secrets live in files and devices that nothing backs up.** Only the keys
+   of a note's owner set, which a device holds, can authorize its spend, so
+   losing that device and its backup loses every note of the set. A wallet
+   seed derives the nullifier key of every address it makes, which finds and
+   proves the address's notes and shows when they are spent. A fixture holds
+   the only openings of its notes, the authorizer keys of its spends and the
+   seeds of the software owners that stand in for its wallets' devices, so
+   losing a fixture loses its unspent notes, and anyone who reads one can spend
+   them. Back these up, keep them readable by their owner only, and keep a
    fixture until its notes are spent. The generators' fixed seed is public, so
    the smoke generator refuses it off the local test chain and pool, and the
    nonce-race generator off that chain or with `--rpc`.
@@ -79,6 +83,37 @@ on EIP-8141 making an explicit 32-byte zero `msg` invalid, which reserves 0 for
 the empty case: a client that admitted one would let a signature over that
 fixed digest pass as one over the transaction.
 
+A spend also carries its owner's signature, which the pool takes only as the
+second of exactly two signatures, from secp256k1, with the spend's EIP-712
+intent digest as its explicit `msg`. Its signer is the owner the proof binds,
+and the proof shows that address is a leaf of the inputs' owner set, so only a
+key of that set can authorize the spend. That keeps spending on the device only
+if every leaf of the set is a device address. The wallet builds `Q`, and with it
+the receive address, from addresses the device reports, and a stock device can
+check neither. Malware on the machine that builds them can add an address of its
+own and later spend every note paid there. Build the set and the address on a
+machine you trust, and compare the address another way, or use a device app that
+recomputes `Q` from its own keys. The authorizer's signature covers the owner's
+signature bytes, since EIP-8141 elides only the bytes of signatures with an
+empty `msg`. The intent names the spend's nullifiers, outputs, withdrawal and
+fee for one chain and pool, and omits the root, the epoch and the authorizer.
+Whoever holds a signed intent and the notes' openings can therefore prove that
+same spend again against any root, under any authorizer, with any fourth frame,
+notes and gas fields the proof's fee covers, but cannot change what it spends,
+creates, withdraws or pays. A signed intent does not expire, so it stays usable
+until one of its notes is spent: the only way to cancel an intent is to spend
+one of its notes in another spend first. The wallet that proves holds the owner
+set's root and addresses and each note's nullifier key and `rho`: it can find
+the wallet's notes and see when they are spent, but not spend them.
+
+A device that displays typed data shows a withdrawal's amount and recipient and
+the fee, but the nullifiers and outputs are opaque to it. A compromised wallet
+could therefore swap the recipient or change of a private transfer that the
+user approves on the device. Showing who a private transfer pays needs a device
+app that recomputes each output from its opening, and a way to authenticate
+the payee's address, such as a signed payment request. The pool needs no
+change for such an app.
+
 The client encrypts notes with ML-KEM-768 and ChaCha20-Poly1305 from
 `node:crypto`, which needs Node 24.7 or later built against OpenSSL 3.5 or
 later; without ML-KEM, note delivery stops with an error. ML-KEM keys derive
@@ -123,9 +158,9 @@ forkchoiceUpdated. A recheck takes an estimated 1.1 to 1.3 ms on fast hardware,
 from a measurement not recorded in this repository, so on `64b8fc09`, which has
 no width budget, about 6,000 to 7,000 pending spends, fewer on slower nodes,
 would exceed the Engine API's 8-second limit. Raising a pending spend's fee
-past its proof's fee needs a new proof with the same dummy input: a new dummy
-changes the key set, which the mempool refuses while the first spend is
-pending.
+past its proof's fee needs a new proof with the same dummy input, since a new
+dummy changes the key set, which the mempool refuses while the first spend is
+pending, and a new owner signature, since the intent covers the fee.
 
 ## Privacy limits
 
@@ -141,6 +176,12 @@ public, and these patterns can still link a spend to a deposit or another spend:
   account or spend. Prove against a root someone else published, or publish
   from an unrelated account.
 - Reusing an authorizer, or using one tied to the depositor, links spends.
+- Each spend reveals its owner, an address of the owner set. Reusing one links
+  the spends that reveal it, so a wallet must record each address that has
+  signed, across restarts and devices; the client here keeps that record in
+  memory only, for its fixtures. Whoever knows the set's addresses can link
+  every spend from the set: the wallet, anyone who reads it, and any prover the
+  wallet hands a spend to.
 - A spend reveals its input epoch, so notes in different epochs never share an
   anonymity set. Anyone can force a new epoch by filling the tree: `2^20`
   deposits at about 0.8 million gas each, roughly 800 ETH at 1 gwei and almost
@@ -159,10 +200,9 @@ public, and these patterns can still link a spend to a deposit or another spend:
   value. If that output is later withdrawn in full, the amount links the
   withdrawal to it, even when the output belongs to someone else. A receipt
   also reveals each note's `inner`, which links any other note paid to the
-  same `inner`. A nullifier
-  key covers every note of its spend key in the epoch, which includes every
-  note paid to one address, so export refuses such a key unless
-  `--address-wide` accepts it.
+  same `inner`. A domain key covers every note of its nullifier key in the
+  epoch, which includes every note paid to one address, so export refuses
+  such a key unless `--address-wide` accepts it.
 - Export matches the pool's logs locally, with one exception. When the node's
   logs do not show the spend or creation of a disclosed note that the fixture
   spends, export reads that note's nullifier slot in the EIP-8250 nonce
@@ -174,8 +214,8 @@ public, and these patterns can still link a spend to a deposit or another spend:
 
 The pool does not check what a note says, so a wrong note only hides a payment
 from its recipient, and the sender can deliver the opening another way. A
-public address has no checksum: a mistyped `owner_pk` is a valid key nobody
-holds, so a payment to it is lost, and a mistyped ML-KEM key usually still
+public address has no checksum: a mistyped `owner_pk` is a valid key no owner
+set opens, so a payment to it is lost, and a mistyped ML-KEM key usually still
 loads and hides the payment. Copy an address whole; never retype it. A
 repeated index links two payments and reveals the XOR of their amounts, so a
 wallet must save each reservation before broadcasting
@@ -253,9 +293,12 @@ archive, which nobody guarantees to keep.
 
 - Groth16 knowledge soundness, BN254 pairing security, Poseidon and Keccak
   collision resistance, and secp256k1 unforgeability.
-- Joint UHF hardness of Keccak mod p and circomlib's Poseidon(10), under which
+- Joint UHF hardness of Keccak mod p and circomlib's Poseidon(11), under which
   [eprint 2025/1500](https://eprint.iacr.org/2025/1500) binds the statement to
   three public signals ([design](docs/design.md#the-statement-is-compressed)).
+- An owner's device that keeps the owner set's keys and signs only the intents
+  its user approves, as EIP-712 typed data or their digest, and an owner set
+  built on a trusted machine from the device's addresses only.
 - ML-KEM-768 ciphertexts that hide the key they were made for, proven for
   round-3 Kyber (PKC 2023) and not checked separately for FIPS 203.
 - A public multi-party phase 1 and a multi-party phase 2 with destroyed

@@ -15,10 +15,12 @@ import { concat, fromHex, keccak, toBytes, toHex, word } from "../src/bytes.ts";
 import { actionOptions } from "../src/cli/pool.ts";
 import { InputError, PoolError } from "../src/errors.ts";
 import {
+  addressOf,
   calldataFloorGas,
   encodeFrame,
   executionCapUsage,
   rawTx,
+  recoverSigner,
   rlpInt,
   rlpItems,
   rlpList,
@@ -26,6 +28,7 @@ import {
   stateGasLimit,
   totalGasLimit,
   type Frame,
+  type FrameSig,
   type FrameTx,
 } from "../src/frametx.ts";
 // The expected limits come from the wallet defaults in gas.ts, never from the client's frame
@@ -34,11 +37,23 @@ import * as gas from "../src/gas.ts";
 import { PRECOMPILES, UNCLAIMABLE_RECIPIENTS } from "../src/protocol.ts";
 import { poolNode, type PoolNode } from "../src/rpc.ts";
 import { buildAndSend, spendVerdict, type Simulation, type TailKind } from "../src/send.ts";
-import { checkTxResourceLimits, spendTailFrame, type Action } from "../src/spend.ts";
+import {
+  checkTxResourceLimits,
+  signTransaction,
+  spendTailFrame,
+  type Action,
+} from "../src/spend.ts";
 import { rpcServer } from "./helpers.ts";
 
 const POOL = 0xbeefn;
 const ACCOUNT = 0xa11cen;
+/** A spend's owner signature entry, which the sender places after the authorizer's as given. */
+const OWNER: FrameSig = {
+  scheme: 1n,
+  signer: 0x0be1n,
+  msg: keccak(Buffer.from("an intent")),
+  signature: Uint8Array.of(1, ...Array<number>(64).fill(0x77)),
+};
 const ACTION_GAS = 300_000n;
 const SETTLE_SIGNATURE =
   "settle((bytes32,uint64,uint64,bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,address,address))";
@@ -351,6 +366,7 @@ async function sendCase(options: SendCase): Promise<{ error: unknown; sent: Uint
         settle: o.settle,
         proof: new Uint8Array(288),
         recentRoot: new Uint8Array(72),
+        owner: OWNER,
         action: o.action,
         allowFailedClaim: o.allowFailedClaim,
       } as const);
@@ -447,12 +463,15 @@ describe("send gates", () => {
     // Its frames are the ones spendTx writes out from gas.ts, though the simulation reported gas.
     const frames = rlpItems(sent[0].subarray(1))[4];
     assert.deepEqual(frames, rlpList(spendTx(CUSTOM_TAIL).frames.map(encodeFrame)));
-    // The whole signed transaction (default fees for base fee 1, RFC 6979 signature with key 1),
-    // as the Python client broadcast it in the same case (commit 2386147).
-    assert.equal(
-      toHex(keccak(sent[0])),
-      "0x298483c6c4fedbd0403db74fd320d0182a0bbb71357da5d27422647cb34595f5",
-    );
+    // The whole signed transaction: those frames, the default fees for base fee 1, and key 1's
+    // signature over the transaction hash before the owner's entry, which is sent as given.
+    const key = toBytes(1n, 32);
+    const fees = { maxPriorityFee: 10n ** 9n, maxFee: 2n + 10n ** 9n };
+    const expected: FrameTx = { ...spendTx(CUSTOM_TAIL), ...fees, signatures: [] };
+    assert.deepEqual(sent[0], rawTx(signTransaction(expected, key, OWNER)));
+    assert.deepEqual(expected.signatures[1], OWNER);
+    const authorizer = expected.signatures[0].signature;
+    assert.equal(recoverSigner(sigHash(expected), authorizer), addressOf(key));
   });
 
   // A proof fixes the fee that must cover the transaction's maximum cost, so a lower cap can

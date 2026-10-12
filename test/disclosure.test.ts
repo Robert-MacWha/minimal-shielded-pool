@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
-import { concat, hex32, hexPadded, keccak, toHex, word } from "../src/bytes.ts";
+import { concat, hex32, hexPadded, keccak, toBigint, toHex, word } from "../src/bytes.ts";
 import {
   decodeSpend,
   exportReceipt,
@@ -36,6 +36,8 @@ const POOL = 0xcb83980f3cc99e258295814375b0a94fe0ac0e86n;
 const POOL_HEX = "0xcb83980f3cc99e258295814375b0a94fe0ac0e86";
 const ALICE = 0xa11cen;
 const ETH = 10n ** 18n;
+/** The owner set every note of the story belongs to. */
+const OWNER_ROOT = toBigint(keccak(new TextEncoder().encode("the story's owner set"))) % pr.P;
 const CLI = fileURLToPath(new URL("../src/cli/disclosure.ts", import.meta.url));
 
 const TMP = mkdtempSync(join(tmpdir(), "disclosure-test-"));
@@ -115,9 +117,9 @@ const byName = <T>(f: (k: Name) => T) =>
  * Alice deposits 1 ETH, pays Bob 0.6 privately keeping 0.35 change, and withdraws 0.3 of the
  * change; a contract the withdrawal's fourth frame calls shields 5 ETH. Bob later withdraws his
  * note. The same commitment as Alice's deposit also lands at leaf 3, and at leaf 0 of epoch 1
- * after a rollover. With sharedKey, Alice's change uses her deposit's spend key, as two notes
- * paid to one address (src/notes.ts) do. With aliceKey, her deposit uses that spend key. Every
- * call draws the same notes.
+ * after a rollover. With sharedKey, Alice's change uses her deposit's nullifier key, as two
+ * notes paid to one address (src/notes.ts) do. With aliceKey, her deposit uses that nullifier
+ * key. Every note is in one owner set, and every call draws the same notes.
  */
 function story(sharedKey = false, aliceKey?: bigint, dummyKey?: bigint) {
   const rng = seededRng(7n);
@@ -128,7 +130,8 @@ function story(sharedKey = false, aliceKey?: bigint, dummyKey?: bigint) {
   if (dummyKey !== undefined) notes.d1 = [dummyKey, notes.d1[1]];
   const values = { a: ETH, b: (6n * ETH) / 10n, c: (35n * ETH) / 100n, e: 5n * ETH };
   const valueOf = (k: Name) => (k in values ? values[k as keyof typeof values] : 0n);
-  const cm = byName((k) => pr.commitment(notes[k][0], notes[k][1], valueOf(k)));
+  const pk = (k: Name) => pr.ownerPk(OWNER_ROOT, notes[k][0]);
+  const cm = byName((k) => pr.commitment(pk(k), notes[k][1], valueOf(k)));
   // Each input's nullifier is at its leaf: b at 1, c at 2, and a and the dummy d notes at 0.
   const at: Partial<Record<Name, bigint>> = { b: 1n, c: 2n };
   const nf = byName((k) => pr.nullifier(D, notes[k][0], cm[k], at[k] ?? 0n));
@@ -153,8 +156,9 @@ function story(sharedKey = false, aliceKey?: bigint, dummyKey?: bigint) {
   chain.add("0xdep3", ALICE, [frame([leaf(cm.a, 0n, 3n)])]);
   chain.add("0xdep_epoch1", ALICE, [frame([leaf(cm.a, 1n, 0n)])]);
   const op = (k: Name, leafIndex: number | null = null) => {
-    const [spend_key, rho] = notes[k].map(hex32);
-    return { spend_key, rho, value: String(valueOf(k)), leaf: leafIndex };
+    const [nk, rho] = notes[k].map(hex32);
+    const owner_root = hex32(OWNER_ROOT);
+    return { owner_root, nk, rho, value: String(valueOf(k)), leaf: leafIndex };
   };
   // Like the repository's generators, Alice's fixture also holds Bob's key.
   const fixture = {
@@ -324,7 +328,7 @@ test("export fails on a consumed spend the node's logs miss and skips one never 
   gap.unindexed.add("0xtransfer");
   await assert.rejects(exportFor(gap, fixture, [cm.a]), refusal("logs do not show"));
   // A spend the fixture holds but that was never sent consumed nothing: its dummy is left out.
-  const unsent = { epoch: 0, inputs: [{ ...op("d1"), spend_key: hex32(1n) }] };
+  const unsent = { epoch: 0, inputs: [{ ...op("d1"), nk: hex32(1n) }] };
   assert.deepEqual(await exportFor(chain, { ...fixture, unsent }, undefined, true), receipt);
 });
 
@@ -517,7 +521,7 @@ test("verify takes only a receipt for the config's pool", async () => {
 });
 
 test("a nullifier key shared by an address's notes needs consent and is marked", async () => {
-  // Two notes under one spend key, as one address's notes are: a nullifier key would show
+  // Two notes under one nullifier key, as one address's notes are: a domain key would show
   // when either is spent, so export refuses unless asked, and then marks the scope. The
   // receipt still verifies.
   const shared = story(true);
@@ -530,7 +534,7 @@ test("a nullifier key shared by an address's notes needs consent and is marked",
   await verify(shared.chain, wide);
   // A wallet's own key is its address's, even under the one note the fixture holds.
   const seed = new Uint8Array(32).fill(1);
-  const paid = story(false, new WalletKeys(seed).spendKey);
+  const paid = story(false, new WalletKeys(seed, OWNER_ROOT).nk);
   const withWallet = { ...paid.fixture, wallets: { alice: { seed: toHex(seed) } } };
   await assert.rejects(exportFor(paid.chain, withWallet), refusal("--address-wide"));
 });
@@ -541,7 +545,7 @@ test("a real note's key needs consent at any account", async () => {
   // refuses the key unless asked and then marks it, at account 1 as at account 0.
   const seed = new Uint8Array(32).fill(1);
   for (const account of [0n, 1n]) {
-    const paid = story(false, new WalletKeys(seed, account).spendKey);
+    const paid = story(false, new WalletKeys(seed, OWNER_ROOT, account).nk);
     const named = [{ seed: toHex(seed), account: Number(account) }, { seed: toHex(seed) }];
     const fixtures = [
       ...named.map((alice) => ({ ...paid.fixture, wallets: { alice } })),
@@ -576,7 +580,7 @@ test("a dummy input's key needs consent too, and a receipt without a key does no
   const seed = new Uint8Array(32).fill(1);
   const D = pr.domainScalar(CHAIN, POOL, 0n);
   for (const account of [0n, 1n]) {
-    const key = new WalletKeys(seed, account).spendKey;
+    const key = new WalletKeys(seed, OWNER_ROOT, account).nk;
     const reused = story(false, undefined, key);
     const alice = { seed: toHex(seed), account: Number(account) };
     for (const fx of [{ ...reused.fixture, wallets: { alice } }, reused.fixture]) {
@@ -584,7 +588,7 @@ test("a dummy input's key needs consent too, and a receipt without a key does no
       await assert.rejects(exportFor(reused.chain, fx, only), refusal("--address-wide"));
       const [note] = (await exportFor(reused.chain, fx, only, true)).notes;
       assert.equal(note.keyScope, "address");
-      assert.equal(note.nullifierKey, hex32(pr.nullifierKey(D, key)), "the address's key");
+      assert.equal(note.nullifierKey, hex32(pr.domainKey(D, key)), "the address's key");
     }
   }
   // A payment's output the fixture does not spend, such as Bob's, needs no consent.

@@ -15,18 +15,19 @@
 // that is too low only makes the transaction invalid, and the proof fee covers whatever is
 // declared, so wallets can raise them after a repricing without a new pool. The recent-root
 // frame (cold access to the predeploy, two keccaks, one cold SLOAD over one 72-byte tuple)
-// used 5,579. With hybrid public-input compression the proof frame uses 210,049, plus 90
-// with a fourth frame and 27 when nf1 > nf2, and the heaviest spend needs a limit of
-// 216,141 because each nested call keeps back 1/64 of its gas. The defaults leave about
-// 2,400 and 8,850 gas of headroom, so the declared validation budget is 235,800.
+// used 5,579. With hybrid public-input compression and the owner's intent digest the proof
+// frame uses 210,659, plus 90 with a fourth frame and 27 when nf1 > nf2, and the heaviest
+// spend needs a limit of 216,751 because each nested call keeps back 1/64 of its gas. The
+// defaults leave about 2,400 and 8,250 gas of headroom, so with the two signatures the
+// declared validation budget is 238,600.
 export const RECENT_ROOT_FRAME_GAS = 8_000n;
 export const RECENT_ROOT_TUPLE_BYTES = 72;
-// position-notes-v3 appends notes to settle(Spend) and adds one to shield, so its
-// transactions are not wire compatible with position-notes-v2.
-export const POOL_PROFILE = "position-notes-v3";
+// owner-set-v1 commits each note to an owner set and adds the owner's signature to every
+// spend, so its notes, proofs and transactions are not compatible with position-notes-v3.
+export const POOL_PROFILE = "owner-set-v1";
 // The previous profile. Between a profile change and its first deployment the deployment
 // record still names it, and the CLI refuses to spend against it.
-export const PREVIOUS_POOL_PROFILE = "position-notes-v2";
+export const PREVIOUS_POOL_PROFILE = "position-notes-v3";
 // A note is a 16-byte tag, a 16-byte encrypted amount and a 16-byte authentication tag
 // (src/notes.ts). Settlement calldata is settle(Spend) followed by two notes, and a
 // sender's first payment to a public address puts its ML-KEM-768 ciphertext before them.
@@ -77,11 +78,14 @@ export const SPEND_NONCE_KEY_COUNT = 2n;
 export const KEYED_NONCE_FIRST_USE_STATE_GAS = STATE_BYTES_PER_STORAGE_SET * CPSB;
 export const VERIFY_FRAME_STATE_GAS = SPEND_NONCE_KEY_COUNT * KEYED_NONCE_FIRST_USE_STATE_GAS;
 
-// The public mempool budgets the two prefix frames and the signature together. The Hegotá
-// testnet admits up to 500,000 (`--mempool.max-verify-gas`); EIP-8141's published default is
-// 100,000, which this profile has never fit.
+// The public mempool budgets the two prefix frames and the signatures together. A spend has
+// two secp256k1 signatures, the authorizer's and the owner's. The Hegotá testnet admits up to
+// 500,000 (`--mempool.max-verify-gas`); EIP-8141's published default is 100,000, which this
+// profile has never fit.
 export const SIGNATURE_GAS = 2_800n;
-export const REQUIRED_VERIFY_BUDGET = RECENT_ROOT_FRAME_GAS + VERIFY_FRAME_GAS + SIGNATURE_GAS;
+export const SPEND_SIGNATURES = 2n;
+export const REQUIRED_VERIFY_BUDGET =
+  RECENT_ROOT_FRAME_GAS + VERIFY_FRAME_GAS + SPEND_SIGNATURES * SIGNATURE_GAS;
 export const HEGOTA_TESTNET_MAX_VERIFY_GAS = 500_000n;
 // EIP-8141 `MAX_VERIFY_STATE_GAS`: the prefix frames' state budgets together.
 export const MAX_VERIFY_STATE_GAS = 500_000n;

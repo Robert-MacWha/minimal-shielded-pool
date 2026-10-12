@@ -128,10 +128,11 @@ function silentNode(): PoolNode & { calls: string[] } {
 
 const noKey = async (): Promise<Uint8Array> => assert.fail("the funded key was read");
 
-test("this tree spends position-notes-v3, with the recorded deployment's formulas", () => {
-  assert.equal(POOL_PROFILE, "position-notes-v3");
-  // The record names this profile's testnet deployment.
-  assert.equal(DEPLOYED.profile, POOL_PROFILE);
+test("this tree spends owner-set-v1, with the recorded deployment's formulas", () => {
+  assert.equal(POOL_PROFILE, "owner-set-v1");
+  // Until this profile is deployed the record names the previous one, which the spend CLI
+  // refuses. Both profiles share the formulas checked here.
+  assert.ok([POOL_PROFILE, PREVIOUS_POOL_PROFILE].includes(DEPLOYED.profile as string));
   assert.equal(domainScalar(CHAIN, POOL), BigInt(DEPLOYED.domain as string));
   // keccak(pool || epoch 0), written out rather than read from the client.
   const source = toHex(keccak(concat(toBytes(POOL, 20), new Uint8Array(32))));
@@ -170,14 +171,20 @@ describe("command-line flags", () => {
     });
   }
 
+  const SMOKE = readJson(FIXTURE);
+  /** The chain and pool the smoke fixture's owner signatures were made for. */
+  const SMOKE_DEPLOYMENT = { chainId: Number(SMOKE.chain_id), pool: SMOKE.pool_address as string };
+
   /**
-   * A spend of the smoke fixture, a transfer by default, that reaches the sender, which records
-   * what it is given instead of sending: the node holds the spend's root at slot 5.
+   * A spend of the smoke fixture, a transfer by default, from a pool on `at`'s chain and
+   * address, by default the fixture's, that reaches the sender, which records what it is given
+   * instead of sending: the node holds the spend's root at slot 5.
    */
-  function recordedSpend(op = "transfer") {
-    const config = writeTemp("config.json", { ...DEPLOYED, profile: POOL_PROFILE });
-    const entry = readJson(FIXTURE)[op] as Json;
-    const stored = recentRootEntry(sourceId(POOL, 0n), 5n, BigInt(entry.root as string));
+  function recordedSpend(op = "transfer", at = SMOKE_DEPLOYMENT) {
+    const config = writeTemp("config.json", { ...DEPLOYED, profile: POOL_PROFILE, ...at });
+    const entry = SMOKE[op] as Json;
+    const source = sourceId(BigInt(at.pool), 0n);
+    const stored = recentRootEntry(source, 5n, BigInt(entry.root as string));
     const node: PoolNode = {
       async call(method) {
         if (method === "eth_getBlockByNumber") return { slotNumber: "0x6" };
@@ -214,6 +221,21 @@ describe("command-line flags", () => {
     const expected: Action = { target: BigInt(target), data, gasLimit: 300_000n, stateLimit: 0n };
     const actions = sent.map((send) => send.kind === "spend" && send.action);
     assert.deepEqual(actions, [expected, expected]);
+  });
+
+  // The owner signed the spend's intent for the fixture's chain and pool, so a config for another
+  // deployment cannot send it.
+  test("a spend whose owner signed it for another chain or pool is refused before sending", async () => {
+    const { chainId, pool } = SMOKE_DEPLOYMENT;
+    for (const at of [
+      { chainId: chainId + 1, pool },
+      { chainId, pool: DEPLOYED.pool as string },
+    ]) {
+      const { argv, deps, sent } = recordedSpend("transfer", at);
+      const text = "owner signature does not sign this spend's intent for this chain and pool";
+      refused(await runMain(argv, deps), text, JSON.stringify(at));
+      assert.equal(sent.length, 0);
+    }
   });
 
   test("an action flag given twice is refused", async () => {
@@ -261,7 +283,7 @@ describe("command-line flags", () => {
   test("--spend-key sends the fixture entry it names", async () => {
     const { argv, deps, sent } = recordedSpend("withdraw");
     assert.equal(await runMain([...argv, "--spend-key", "withdraw_seed"], deps), null);
-    const nf1 = ((readJson(FIXTURE).withdraw_seed as Json).nf1 as string).slice(2);
+    const nf1 = ((SMOKE.withdraw_seed as Json).nf1 as string).slice(2);
     assert.ok(sent.length === 1 && sent[0].kind === "spend");
     assert.ok(toHex(sent[0].settle).includes(nf1), "the settle does not spend withdraw_seed");
   });
@@ -347,7 +369,7 @@ test("the CLI escapes control characters in a node's answer", async () => {
   const hostile = "\x1b]52;c;QUFB\x07\x1b[2K\r\u009b2K";
   const server = await rpcServer(() => ({ error: hostile }));
   try {
-    const config = path("core/deploy_config.json");
+    const config = writeTemp("config.json", { ...DEPLOYED, profile: POOL_PROFILE });
     const { code, stderr } = await runPoolCli([server.url, config, FIXTURE, "shield"]);
     assert.equal(code, 1, stderr);
     assert.ok(!/[\x00-\x08\x0b-\x1f\x7f-\x9f]/.test(stderr), JSON.stringify(stderr));

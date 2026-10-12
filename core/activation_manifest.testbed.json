@@ -3,11 +3,11 @@
   "ceremony": {
     "phase2_contributions": 1,
     "independent_verification": null,
-    "label": "local test-only setup, one phase-2 contribution, occurrence prototype"
+    "label": "local test-only setup, one phase-2 contribution, owner-set prototype"
   },
   "profile": {
-    "wire_profile": "position-notes-v3",
-    "pool_profile": "position-notes-v3",
+    "wire_profile": "owner-set-v1",
+    "pool_profile": "owner-set-v1",
     "eip_8250_merge": "f3079a09e8c606afcb0e5e1a309ff228b88dc067",
     "eip_8272_carrier": "canonical-verifier-frame",
     "eip_8272_pin": "824cbc0b0e",
@@ -16,9 +16,10 @@
     "verify_frame_gas": 225000,
     "verify_frame_state_gas": 195840,
     "signature_gas": 2800,
-    "required_verify_budget": 235800,
+    "spend_signatures": 2,
+    "required_verify_budget": 238600,
     "pre_pr_12279_max_observed_verify_execution_gas": 294401,
-    "post_pr_12279_max_observed_verify_execution_gas": 210166,
+    "post_pr_12279_max_observed_verify_execution_gas": 210776,
     "max_observed_recent_root_frame_gas": 5579,
     "eip_8141_public_mempool_budget": 100000,
     "hegota_profile_2_budget": 1048576,
@@ -30,18 +31,18 @@
     "conservative_settle_state_bound": 489600
   },
   "artifacts": {
-    "core/artifacts/spend.r1cs": "e2f6fc89bc0e478231935d7dab10fb07316f2c6dab4303e95da1a390ce84f9bf",
-    "core/artifacts/spend_final.zkey": "587c048b06d68c61dcb0a9a57b51229def97b219b11827042f4a8faa49499376",
-    "core/artifacts/spend_js/spend.wasm": "9066dcaae1f8a215fc5adb0bfdf6c1e117fbcb09e22e5a80df33aa582346c1db",
-    "core/circuits/spend.circom": "f0651f31f82faefad1d4d57154eea3737f2b373775dc1db1eb49c151abd724d5",
+    "core/artifacts/spend.r1cs": "07979d55d2b2c074e735e2a0eabb60ad726f9af9a79b465280b3f14ff14cc99b",
+    "core/artifacts/spend_final.zkey": "67c1eecb1199ff05e6b816d99a46dd4d43ba4a2e8c2f8ba33867d5fc4dc830d7",
+    "core/artifacts/spend_js/spend.wasm": "612c2a4b15be8db215fdc0de5e54890aefaf77aff309cfafc33a36a26b97063c",
+    "core/circuits/spend.circom": "fd9c62bf68dc47c9dd8e23f0ec11fdcf01f79fa54ae1602f3445efc9e132a101",
     "core/contracts/foundry.toml": "f3b177b748daee7de924f3f0839b326cf9cc3544c9e4f6c64da6becadd0772d1",
-    "core/contracts/src/Groth16Verifier.sol": "5bcda629ac9fa4317d52aef102281b12419c1c385abfe0fa991c5ed22e906676",
+    "core/contracts/src/Groth16Verifier.sol": "7d3316678b3f60a43a102f292d5ae43b769efe7d1e637f7d97a0020b4357c5f0",
     "core/contracts/src/PoseidonT3.sol": "f353af63ac124e51a37e78dc5278bcb2e93c19e44aa8dd13a4ecb4c54212720b",
     "core/contracts/src/PoseidonT4.sol": "2384b8f71a2ed09f3b16c6b0d135bedcd293cb1c862e8a3c893d0ac79eae0960",
     "core/contracts/src/ShieldedPoolLogic.sol": "e5c7a4d5d2b213a7f2617ca32d18780f7744d94b1aa26f4e90def06fb1fb551f",
-    "core/dispatcher/ShieldedPoolDispatcher.yul": "1f0440484c0d722d7d6131d2faa7b15ccbaa4e2fe91678fa123c98b3a10d57fa",
-    "core/artifacts/shielded_pool_dispatcher_init.hex": "a506c59cc30fda7c700943c181dd39419f99d2a5c6908d668d9aa52daa1a5820",
-    "src/gas.ts": "63a5c244509eeb30ceeb8dad98cb8858f6ff5778abc8b025090cdc1502e43083"
+    "core/dispatcher/ShieldedPoolDispatcher.yul": "61b1886b702949232c9e63d672c48b181175faa552e1a1473f3489d1f637629f",
+    "core/artifacts/shielded_pool_dispatcher_init.hex": "3e896d2ac55a89338df1affbeb9afcfc369e8529fdbf6ddfa873419f13f60a47",
+    "src/gas.ts": "aa90b2fa4732952771adfbb6d55827423d83f47fd411b0035e38a602d7018bbb"
   },
   "compiler": {
     "default": {

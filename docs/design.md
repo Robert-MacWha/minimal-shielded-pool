@@ -26,18 +26,44 @@ notes. The pool also pays the gas, out of note value, through the proof's
 Validation needs EIP-8141's new opcodes, which Solidity cannot emit, so the
 dispatcher (`core/dispatcher/ShieldedPoolDispatcher.yul`) is written in Yul
 with `verbatim`. It checks the frame layout, the nonce keys, the recent-root
-tuple, and that the transaction's one signature comes from the proof's one-time
-`authorizer`. It calls the verifier directly, because ethrex forbids a
-delegatecall inside a VERIFY frame, and then approves. Every other call is
+tuple, and the transaction's two signatures: the first from the proof's
+one-time `authorizer` over the whole transaction, the second from the owner
+over the spend's intent. It calls the verifier directly, because ethrex forbids
+a delegatecall inside a VERIFY frame, and then approves. Every other call is
 delegatecalled to `ShieldedPoolLogic`, which shares the dispatcher's storage
 and refuses direct state-changing calls.
+
+## Owners sign, the prover proves
+
+A note's owner key is `Poseidon3(1, Q, nk)`: `Q` is the root of a depth-16 tree
+of one-time secp256k1 addresses whose keys a signing device holds, and `nk` is
+a nullifier key the wallet derives. The prover therefore needs `Q`, the
+addresses and `nk`, but never a key that can spend, as long as `Q` was built
+from the device's addresses. A spend reveals one address
+of the set, the owner, and the pool requires the owner's EIP-8141 signature
+over the spend's EIP-712 intent, which EIP-8141 validates before any frame
+runs. The pool reads the owner from that signature, the proof shows it is a
+leaf of the inputs' owner set, and the circuit refuses an owner of 0, the value
+of an empty leaf. The tree's path bits must be 0 or 1, as in the note tree:
+otherwise a prover who knows a node's children could place any address under
+it, and so spend with a key of its own.
+
+The protocol, not the circuit, checks the signature, so the circuit stays free
+of curve arithmetic and any wallet that signs EIP-712 typed data can hold the
+keys. The price is that the owner is public, so each address signs one spend,
+and the transaction carries a second signature. The intent omits the root, the
+epoch and the authorizer, so a stale proof can be proved again, beside the
+same dummy input, without the device. Checking an EdDSA signature over
+BabyJubJub in the circuit would also keep the key off the prover, at about the
+same circuit cost and with reusable keys, but only sideloaded device apps sign
+it, while stock hardware wallets and threshold signers sign EIP-712.
 
 ## Notes are occurrences
 
 The nullifier binds a note's epoch and leaf index, not only its commitment:
 
 ```text
-nf = Poseidon3(4, Poseidon2(D, spend_key), Poseidon2(cm, leaf_index))
+nf = Poseidon3(4, Poseidon2(D, nk), Poseidon2(cm, leaf_index))
 ```
 
 Here `D` hashes the chain ID, the pool and the epoch of the root the spend
@@ -55,8 +81,9 @@ nullifier formula needs a fresh deployment.
 
 ## The statement is compressed
 
-A spend's statement is ten values (`nf1, nf2, outCm1, outCm2, root, domain,
-publicAmount, fee, recipient, authorizer`), all in the settlement calldata.
+A spend's statement is eleven values (`nf1, nf2, outCm1, outCm2, root, domain,
+publicAmount, fee, recipient, authorizer, owner`): the first ten in the
+settlement calldata, and the owner as the owner signature's signer.
 Groth16 verification costs gas per public input, so the proof exposes only
 three, using the hybrid compression of
 [eprint 2025/1500](https://eprint.iacr.org/2025/1500). With `r` the BN254
@@ -65,8 +92,9 @@ circuit computes `beta = Poseidon(statement)`, and both evaluate `gamma`, the
 statement as a polynomial at `alpha + beta`. This saved about 44,100 gas per
 spend (PR 19).
 
-The verifier no longer sees the ten values, so the dispatcher range-checks each
-one. Without that, a note owner could re-prove a spend with a value plus `r`.
+The verifier no longer sees the statement, so the dispatcher range-checks each
+value, except the owner, which the protocol gives as a 20-byte address.
+Without that, a note owner could re-prove a spend with a value plus `r`.
 The proof would still verify, so the pool would approve and pay the gas, and
 settlement, which re-checks the values, would then revert. An aliased
 nullifier gives fresh nonce keys, so the pool would pay each time, and an
@@ -137,14 +165,16 @@ A change to the tree or the statement touches all of these:
   test setup, not a ceremony, and `tools/patch-verifier.ts` patches the
   verifier it exports);
 - the dispatcher's statement handling, its frame data length pins (in the
-  README's [frame table](../README.md#transactions)), the `settle` selector
-  and the constructor's empty root;
+  README's [frame table](../README.md#transactions)), the `settle` selector,
+  the owner's intent and the constructor's empty root;
 - `ShieldedPoolLogic`'s tree constants, `Spend` struct, storage layout,
   insertion and epoch roll, and the Forge tests;
 - the client's shared definitions in `src/protocol.ts`: the note hashes,
-  nullifier, statement and compression, the `Spend` fields, selectors, events,
-  ABI encoders and empty root, with the frame data sizes in `src/gas.ts`;
-- the client code built on them: `src/wallet.ts` (tree and witness),
+  nullifier, statement and compression, the owner's intent, the `Spend` fields,
+  selectors, events, ABI encoders and empty root, with the frame data sizes in
+  `src/gas.ts`;
+- the client code built on them: `src/wallet.ts` (trees and witness),
+  `src/owner.ts` (owner sets),
   `src/spend.ts` (calldata and frames), `src/deployment.ts` (the
   deployed-profile checks), `src/notes.ts` (output commitments), `src/scan.ts`,
   whose scanner rebuilds positions from `LeafAppended` and tracks spends by

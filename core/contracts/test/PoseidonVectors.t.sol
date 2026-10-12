@@ -64,19 +64,20 @@ contract PoseidonVectorsTest {
     /// (the exact values the circom circuit computes for the same secrets).
     function test_pool_chain() external view {
         string memory json = vm.readFile(PATH);
-        uint256 spendKey = _u(json, ".pool_chain.spend_key");
+        uint256 ownerRoot = _u(json, ".pool_chain.owner_root");
+        uint256 nk = _u(json, ".pool_chain.nk");
         uint256 rho = _u(json, ".pool_chain.rho");
         uint256 value = _u(json, ".pool_chain.value");
         uint256 domain = _u(json, ".pool_chain.domain");
         uint256 index = _u(json, ".pool_chain.index");
 
-        uint256 ownerPk = PoseidonBN254.hash3(1, spendKey, 0);
+        uint256 ownerPk = PoseidonBN254.hash3(1, ownerRoot, nk);
         require(ownerPk == _u(json, ".pool_chain.owner_pk"), "owner_pk mismatch");
         uint256 inner = PoseidonBN254.hash2(ownerPk, rho);
         require(inner == _u(json, ".pool_chain.inner"), "inner mismatch");
         uint256 cm = PoseidonBN254.hash3(2, inner, value);
         require(cm == _u(json, ".pool_chain.cm"), "cm mismatch");
-        uint256 domainKey = PoseidonBN254.hash2(domain, spendKey);
+        uint256 domainKey = PoseidonBN254.hash2(domain, nk);
         uint256 nf = PoseidonBN254.hash3(4, domainKey, PoseidonBN254.hash2(cm, index));
         require(nf == _u(json, ".pool_chain.nf"), "nf mismatch");
         uint256 nf2 = PoseidonBN254.hash3(4, domainKey, PoseidonBN254.hash2(PoseidonBN254.hash3(2, inner, 0), index));

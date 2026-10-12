@@ -2,7 +2,9 @@
  * The occurrence nullifier circuit, with real witnesses against the committed artifacts and one
  * real Groth16 proof: duplicates of one commitment at different positions get distinct
  * nullifiers, the committed R1CS (not only the WASM's runtime asserts) rejects every broken
- * witness, beta and gamma are constrained, assertUnprovable (the smoke generator's soundness
+ * witness, including an owner outside the owner set, an empty leaf as the owner, and a
+ * non-boolean path bit that would place any address under the set's root, beta and gamma are
+ * constrained, assertUnprovable (the smoke generator's soundness
  * gate) counts only an in-circuit assertion as a refusal, verify() accepts the call the pool
  * probes a deployed verifier with, and it refuses every mutated statement value and the
  * out-of-field words and signals that snarkjs alone would accept. The consumed-key registry and
@@ -28,6 +30,7 @@ import * as untyped from "snarkjs";
 import { mod } from "../src/bytes.ts";
 import { InputError } from "../src/errors.ts";
 import { referenceVerifierCalls } from "../src/deployment.ts";
+import { OwnerSet } from "../src/owner.ts";
 import { WASM, assertUnprovable, prove, terminate, verify } from "../src/prover.ts";
 import type { ProofWords } from "../src/prover.ts";
 import * as pr from "../src/protocol.ts";
@@ -63,7 +66,7 @@ const Q = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47n;
 
 const word = (x: bigint) => x.toString(16).padStart(64, "0");
 
-/** The pool's alpha, computed here: keccak256 of the ten 32-byte big-endian words, mod P. */
+/** The pool's alpha, computed here: keccak256 of the eleven 32-byte big-endian words, mod P. */
 function keccakAlpha(stmt: readonly bigint[]): bigint {
   const hash = keccak_256(Buffer.from(stmt.map(word).join(""), "hex"));
   return BigInt("0x" + Buffer.from(hash).toString("hex")) % pr.P;
@@ -94,7 +97,9 @@ let work = "";
 const UNCHECKED = [
   "    in_value[0] + in_value[1] === out_value[0] + out_value[1] + public_amount + fee;\n",
   "        bits[i] * (bits[i] - 1) === 0;\n",
-  "    (cur[DEPTH] - root) * value === 0;\n",
+  "    (path.root - root) * value === 0;\n",
+  "    ownerPath.root === owner_root;\n",
+  "    ownerIsZero.out === 0;\n",
   "            (out_inner[k] - SINK_INNER_0) * outIsZero[k].out === 0;\n",
   "            (out_inner[k] - SINK_INNER_1) * outIsZero[k].out === 0;\n",
   "        outEqSink0[k].out * (1 - outIsZero[k].out) === 0;\n",
@@ -239,20 +244,20 @@ async function onCommittedWires(variant: Variant, witness: Witness, label: strin
   return patched(label, await template(), placed);
 }
 
-/** The ten statement values a witness should prove, given the nullifiers it should compute. */
+/** The eleven statement values a witness should prove, given the nullifiers it should compute. */
 function statementFor(w: Witness, [nf1, nf2]: readonly bigint[]): bigint[] {
   const outputs = w.out_inner.map((out, k): pr.Output => [BigInt(out), BigInt(w.out_value[k])]);
   const [outCm1, outCm2] = pr.outputCommitments(outputs);
   const [root, domain, publicAmount, fee] = [w.root, w.domain, w.public_amount, w.fee].map(BigInt);
-  const [recipient, authorizer] = [w.recipient, w.authorizer].map(BigInt);
-  const terms = { root, domain, publicAmount, fee, recipient, authorizer };
+  const [recipient, authorizer, owner] = [w.recipient, w.authorizer, w.owner].map(BigInt);
+  const terms = { root, domain, publicAmount, fee, recipient, authorizer, owner };
   return pr.statement({ nf1, nf2, outCm1, outCm2, ...terms });
 }
 
 /**
  * The committed WASM computes the witness and the committed R1CS accepts it. The statement is
  * private: beta and gamma (wires 1 and 2, then alpha) match the expected statement only if the
- * circuit computed exactly these ten values, which binds its nullifiers to the expected ones.
+ * circuit computed exactly these eleven values, which binds its nullifiers to the expected ones.
  */
 async function accepted(name: string, witness: Witness, expected: readonly bigint[]) {
   const wtns = await calculate(name, witness);
@@ -279,10 +284,16 @@ const rng = seededRng(20260921n);
 const pool = "0x" + "12".repeat(20);
 const recipient = BigInt("0x" + "34".repeat(20));
 const [domain0, domain1] = [0n, 1n].map((epoch) => pr.domainScalar(31337n, pool, epoch));
-const [sk, rho] = newNote(rng);
-const real: pr.SpendInput = { sk, rho, value: 100n, idx: 0n };
+// The notes' owner set: three addresses and empty leaves after them.
+const OWNERS = new OwnerSet([0x1111n, 0x2222n, 0x3333n]);
+const owner = OWNERS.leaf(1);
+/** A note's commitment in OWNERS under nullifier key nk. */
+const noteCm = (nk: bigint, rho: bigint, value: bigint) =>
+  pr.commitment(pr.ownerPk(OWNERS.root, nk), rho, value);
+const [nk, rho] = newNote(rng);
+const real: pr.SpendInput = { nk, rho, value: 100n, idx: 0n };
 const duplicate: pr.SpendInput = { ...real, idx: 1n };
-const cm = pr.commitment(sk, rho, 100n);
+const cm = noteCm(nk, rho, 100n);
 const treeOf = (leaves: readonly bigint[]) =>
   leaves.reduce((tree, leaf) => (tree.append(leaf), tree), new Tree());
 const tree = treeOf([cm, cm, pr.commitment(...newNote(rng), 17n)]);
@@ -297,17 +308,22 @@ const transferOutputs = [60n, 40n].map((value): pr.Output => [pr.inner(...newNot
 // Two funded inputs of 2^128 - 1 and 1, and an output that takes all but 1 of them.
 const max = (1n << 128n) - 1n;
 const wideInputs = [max, 1n].map((value, i): pr.SpendInput => {
-  const [sk, rho] = newNote(rng);
-  return { sk, rho, value, idx: BigInt(i) };
+  const [nk, rho] = newNote(rng);
+  return { nk, rho, value, idx: BigInt(i) };
 });
 const wideOutputs: pr.Output[] = [pr.sinkOutputs()[0], [pr.inner(...newNote(rng)), max]];
 
 /** A withdrawal of every input to the fixed recipient through both sinks, and its statement. */
-function spend(inputs: pr.SpendInput[], on = tree, domain = domain0): [Witness, bigint[]] {
+function spend(
+  inputs: pr.SpendInput[],
+  on = tree,
+  domain = domain0,
+  by = owner,
+): [Witness, bigint[]] {
   const publicAmount = inputs.reduce((sum, i) => sum + i.value, 0n);
-  const terms = { authorizer, publicAmount, recipient };
+  const terms = { authorizer, owner: by, publicAmount, recipient };
   const witness = buildWitness(on, inputs, pr.sinkOutputs(), domain, terms);
-  return [witness, statementFor(witness, pr.inputNullifiers(domain, inputs))];
+  return [witness, statementFor(witness, pr.inputNullifiers(domain, by.root, inputs))];
 }
 
 const [first, firstStmt] = spend([real, dummy]);
@@ -322,24 +338,29 @@ const [otherEpoch, otherEpochStmt] = spend([real, dummy], later, domain1);
 // After the reorg the note is leaf 1 of branchB: the wallet rebuilds the canonical tree and
 // spends it at that index, which is `duplicate`'s opening, before reproving.
 const [rebuilt, rebuiltStmt] = spend([duplicate, dummy], branchB);
-const [dummyPair, dummyStmt] = spend([real, { sk, rho, value: 0n, idx: null }], later);
+const [dummyPair, dummyStmt] = spend([real, { nk, rho, value: 0n, idx: null }], later);
 const atMax = edited(dummyPair, (w) => (w.in_bits[1] = Array(pr.DEPTH).fill("1")));
-const maxNf = pr.nullifier(domain0, sk, pr.commitment(sk, rho, 0n), (1n << BigInt(pr.DEPTH)) - 1n);
+const maxNf = pr.nullifier(domain0, nk, noteCm(nk, rho, 0n), (1n << BigInt(pr.DEPTH)) - 1n);
 const atMaxStmt = statementFor(atMax, [dummyStmt[0], maxNf]);
+// Any leaf of the owner set may sign; leaf 2 takes the other branch at height 1.
+const [lastOwner, lastOwnerStmt] = spend([real, dummy], tree, domain0, OWNERS.leaf(2));
 
 const [twice] = spend([real, real]);
-const transfer = buildWitness(later, [real, dummy], transferOutputs, domain0, { authorizer });
+const transfer = buildWitness(later, [real, dummy], transferOutputs, domain0, {
+  authorizer,
+  owner,
+});
 const [negative, inflated] = [String(pr.P - 10n ** 21n), String(100n + 10n ** 21n)];
-const wideTree = treeOf(wideInputs.map((i) => pr.commitment(i.sk, i.rho, i.value)));
-const wideTerms = { authorizer, publicAmount: 1n, recipient };
+const wideTree = treeOf(wideInputs.map((i) => noteCm(i.nk, i.rho, i.value)));
+const wideTerms = { authorizer, owner, publicAmount: 1n, recipient };
 const wide = buildWitness(wideTree, wideInputs, wideOutputs, domain0, wideTerms);
 // A one-leaf tree whose note holds exactly 2^128, which no wallet can make: buildWitness takes
 // the note at 2^128 - 1 and the case below raises it, so the root still proves its membership.
-const [bigSk, bigRho] = newNote(rng);
-const bigTree = treeOf([pr.commitment(bigSk, bigRho, 1n << 128n)]);
-const bigNote: pr.SpendInput = { sk: bigSk, rho: bigRho, value: max, idx: 0n };
+const [bigNk, bigRho] = newNote(rng);
+const bigTree = treeOf([noteCm(bigNk, bigRho, 1n << 128n)]);
+const bigNote: pr.SpendInput = { nk: bigNk, rho: bigRho, value: max, idx: 0n };
 const bigOutputs: pr.Output[] = [pr.sinkOutputs()[0], [pr.inner(...newNote(rng)), max - 1n]];
-const bigTerms = { authorizer, fee: 1n };
+const bigTerms = { authorizer, owner, fee: 1n };
 /** An input of exactly 2^128 in position k, paying 2^128 - 1 and a fee of 1. */
 const bigInput = (k: number) =>
   edited(
@@ -355,6 +376,39 @@ const bigInput = (k: number) =>
       w.out_value[1] = String(max);
     },
   );
+
+// An address outside the owner set, placed under its root by a non-boolean bit at the top of
+// its path. With every lower bit 0 and sibling 0 the path reaches some node x at height 15;
+// the top sibling s = l + r - x and bit b = (l - x) / (s - x) then make the pair hashed at the
+// top exactly the root's children (l, r), which anyone who knows the set's addresses knows.
+// Only the booleanity of that bit refuses the witness.
+const outsider = 0xa77ac4e5n;
+const [atTop] = Array.from({ length: pr.OWNER_DEPTH - 1 }).reduce<[bigint]>(
+  ([node]) => [pr.p2(node, 0n)],
+  [outsider],
+);
+const { siblings: path0, bits: bits0 } = OWNERS.leaf(0).path;
+const left = path0
+  .slice(0, -1)
+  .reduce(
+    (node, sibling, d) => (bits0[d] === 0 ? pr.p2(node, sibling) : pr.p2(sibling, node)),
+    0x1111n,
+  );
+const right = path0[pr.OWNER_DEPTH - 1];
+const topSibling = mod(left + right - atTop, pr.P);
+const topBit = mod((left - atTop) * modInverse(mod(topSibling - atTop, pr.P)), pr.P);
+const placed = edited(first, (w) => {
+  w.owner = String(outsider);
+  w.owner_siblings = [...Array(pr.OWNER_DEPTH - 1).fill("0"), String(topSibling)];
+  w.owner_bits = [...Array(pr.OWNER_DEPTH - 1).fill("0"), String(topBit)];
+});
+
+/** x^-1 mod P, by Fermat. */
+function modInverse(x: bigint): bigint {
+  let [result, base, e] = [1n, x, pr.P - 2n];
+  for (; e > 0n; e >>= 1n, base = (base * base) % pr.P) if (e & 1n) result = (result * base) % pr.P;
+  return result;
+}
 
 /** first-occurrence's witness from the committed WASM, the template variants are placed on. */
 const template = once(() => calculate("template", first));
@@ -415,6 +469,7 @@ const ACCEPTED: Record<string, [Witness, bigint[]]> = {
   "reorg-rebuilt-tree-and-index": [rebuilt, rebuiltStmt],
   "dummy-same-secret-and-position": [dummyPair, dummyStmt],
   "dummy-arbitrary-maximum-position": [atMax, atMaxStmt],
+  "another-owner-of-the-set": [lastOwner, lastOwnerStmt],
 };
 for (const [name, [witness, stmt]] of Object.entries(ACCEPTED)) {
   test(name, () => accepted(name, witness, stmt));
@@ -439,7 +494,7 @@ const REJECTED: Rejected[] = [
   [
     "same-output-twice-in-one-spend",
     edited(pair, (w) => {
-      w.out_inner = Array(2).fill(String(pr.inner(sk, rho)));
+      w.out_inner = Array(2).fill(String(pr.inner(pr.ownerPk(OWNERS.root, nk), rho)));
       w.out_value = ["100", "100"];
       w.public_amount = "0";
       w.recipient = "0";
@@ -500,6 +555,34 @@ const REJECTED: Rejected[] = [
     ),
   ],
   ["zero-authorizer", edited(first, (w) => (w.authorizer = "0"))],
+  // The owner. An address outside the set; the empty leaf after the set's addresses, whose
+  // value 0 is in the tree; and an outsider placed under the root by a non-boolean path bit.
+  ["owner-outside-the-set", edited(first, (w) => (w.owner = String(outsider)))],
+  [
+    "owner-zero-at-an-empty-leaf",
+    edited(first, (w) => {
+      const { siblings, bits } = treeOfOwners().authPath(3n);
+      Object.assign(w, { owner: "0", owner_siblings: siblings.map(String) });
+      w.owner_bits = bits.map(String);
+    }),
+  ],
+  ["owner-placed-by-a-nonboolean-path-bit", placed],
+  // A note opened under another owner set, or under another nullifier key in its own, is a
+  // leaf the tree does not hold.
+  [
+    "note-of-another-owner-set",
+    edited(first, (w) => {
+      const other = new OwnerSet([0x4444n]).leaf(0);
+      w.owner_root = String(other.root);
+      Object.assign(w, { owner: String(other.address) });
+      w.owner_siblings = other.path.siblings.map(String);
+      w.owner_bits = other.path.bits.map(String);
+    }),
+  ],
+  [
+    "note-under-another-nullifier-key",
+    edited(first, (w) => (w.in_nk[0] = String(mod(nk + 1n, pr.P)))),
+  ],
   ["withdrawal-without-recipient", edited(first, (w) => (w.recipient = "0"))],
   ["recipient-without-withdrawal", edited(transfer, (w) => (w.recipient = String(recipient)))],
   [
@@ -534,7 +617,7 @@ test("reference-canonical-epoch-and-index-bounds", () => {
     assert.throws(() => pr.domainScalar(31337n, pool, epoch), InputError, `epoch ${epoch}`);
   }
   for (const index of [-1n, 1n << BigInt(pr.DEPTH)]) {
-    assert.throws(() => pr.nullifier(domain0, sk, cm, index), InputError, `index ${index}`);
+    assert.throws(() => pr.nullifier(domain0, nk, cm, index), InputError, `index ${index}`);
   }
 });
 
@@ -546,8 +629,8 @@ test("r1cs-rejects-forged-beta-and-gamma", async () => {
   const wires = await committedWires();
   const forgedBeta = mod(beta + 1n, pr.P);
   const sigma = mod(alpha + forgedBeta, pr.P);
-  const acc = [firstStmt[9]];
-  for (let i = 8; i >= 0; i--) acc.unshift(mod(acc[0] * sigma + firstStmt[i], pr.P));
+  const acc = [firstStmt[10]];
+  for (let i = 9; i >= 0; i--) acc.unshift(mod(acc[0] * sigma + firstStmt[i], pr.P));
   const forged = new Map<number, bigint>().set(1, forgedBeta).set(2, acc[0]);
   const named = new Map([["main.sigma", sigma]]);
   acc.forEach((a, i) => named.set(`main.acc[${i}]`, a));
@@ -619,3 +702,10 @@ test("the pool's reference verifier call verifies, and its changed copy does not
   }
   assert.deepEqual(verdicts, [true, false]);
 });
+
+/** OWNERS' tree, for the path of an empty leaf, which OwnerSet does not hand out. */
+function treeOfOwners(): Tree {
+  const owners = new Tree(pr.OWNER_DEPTH);
+  for (const address of OWNERS.addresses) owners.append(address);
+  return owners;
+}

@@ -1,14 +1,15 @@
 /**
- * The wallet's side of a spend: fresh secrets drawn from an Rng, the Merkle tree of note
- * commitments as the pool builds it, and the circom input map that prover.ts proves against
- * core/artifacts/spend_final.zkey. The hashes themselves live in protocol.ts, which mirrors
- * the circuit and the pool.
+ * The wallet's side of a spend: fresh secrets drawn from an Rng, the Merkle trees of note
+ * commitments, as the pool builds them, and of owner sets, and the circom input map that
+ * prover.ts proves against core/artifacts/spend_final.zkey. The hashes themselves live in
+ * protocol.ts, which mirrors the circuit and the pool, and src/owner.ts holds owner sets.
  */
 import { word } from "./bytes.ts";
-import { addressOf } from "./frametx.ts";
+import { addressOf, SECP256K1_N } from "./frametx.ts";
 import {
   DEPTH,
   MAX_VALUE,
+  OWNER_DEPTH,
   P,
   SINK_INNERS,
   compressionAlpha,
@@ -21,12 +22,13 @@ import {
 } from "./protocol.ts";
 import type { Rng } from "./random.ts";
 
-const SECP256K1_N = 0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141n;
-
 // ---- secrets ----
 
-/** A fresh note's secrets (spendKey, rho): uniform field elements, drawn in that order. */
-export function newNote(rng: Rng): [spendKey: bigint, rho: bigint] {
+/**
+ * Fresh note secrets (nk, rho): uniform field elements, drawn in that order. A wallet's nk names
+ * one of its addresses, so a fresh one makes an address for a single payment.
+ */
+export function newNote(rng: Rng): [nk: bigint, rho: bigint] {
   return [rng.below(P), rng.below(P)];
 }
 
@@ -42,13 +44,13 @@ export function newAuthorizer(rng: Rng): [privateKey: Uint8Array, address: bigin
  * zero to conservation.
  */
 export function dummyInput(rng: Rng): SpendInput {
-  const [sk, rho] = newNote(rng);
-  return { sk, rho, value: 0n, idx: null };
+  const [nk, rho] = newNote(rng);
+  return { nk, rho, value: 0n, idx: null };
 }
 
 // ---- the tree ----
 
-/** ZEROS[d] is the root of an empty subtree of height d; an empty leaf is 0. */
+/** ZEROS[d] is the root of an empty subtree of height d; an empty leaf is 0. Both trees use it. */
 const ZEROS = [0n];
 for (let d = 0; d < DEPTH; d++) ZEROS.push(p2(ZEROS[d], ZEROS[d]));
 
@@ -64,12 +66,16 @@ export interface MerkleTree {
   authPath(index: bigint): AuthPath;
 }
 
-/** The path of `index`, reading the node at (height, position) through `node`. */
-function pathOf(index: bigint, node: (height: number, position: bigint) => bigint): AuthPath {
+/** The depth-`depth` path of `index`, reading the node at (height, position) through `node`. */
+function pathOf(
+  index: bigint,
+  node: (height: number, position: bigint) => bigint,
+  depth = DEPTH,
+): AuthPath {
   if (index < 0n) throw new RangeError(`leaf index ${index} is negative`);
   const siblings: bigint[] = [];
   const bits: number[] = [];
-  for (let d = 0; d < DEPTH; d++) {
+  for (let d = 0; d < depth; d++) {
     const position = index >> BigInt(d);
     siblings.push(node(d, position ^ 1n));
     bits.push(Number(position & 1n));
@@ -78,44 +84,54 @@ function pathOf(index: bigint, node: (height: number, position: bigint) => bigin
 }
 
 /**
- * The pool's depth-20 tree of note commitments, padded on the right with empty subtrees. Each
- * level is kept and rehashed only above leaves appended since the last read, so a tree rebuilt
- * from a live pool's leaves is hashed once, not once per root or path.
+ * A Poseidon tree padded on the right with empty subtrees: by default the pool's depth-20 tree
+ * of note commitments, or a shallower one such as an owner set's. Each level is kept and
+ * rehashed only above leaves appended since the last read, so a tree rebuilt from a live pool's
+ * leaves is hashed once, not once per root or path.
  */
 export class Tree implements MerkleTree {
+  readonly depth: number;
   readonly #leaves: bigint[] = [];
   // #levels[d] holds the height-d nodes over the first #hashed leaves; #levels[0] is the leaves.
-  readonly #levels: bigint[][] = [this.#leaves, ...Array.from({ length: DEPTH }, () => [])];
+  readonly #levels: bigint[][];
   #hashed = 0;
 
-  /** The commitments in leaf order. */
+  constructor(depth = DEPTH) {
+    if (!Number.isInteger(depth) || depth < 1 || depth > DEPTH) {
+      throw new RangeError(`a tree's depth is 1 to ${DEPTH}, not ${depth}`);
+    }
+    this.depth = depth;
+    this.#levels = [this.#leaves, ...Array.from({ length: depth }, () => [])];
+  }
+
+  /** The leaves in order. */
   get leaves(): readonly bigint[] {
     return this.#leaves;
   }
 
-  /** Appends a commitment and returns its leaf index. */
-  append(cm: bigint): bigint {
-    if (this.#leaves.length >= 2 ** DEPTH) throw new Error("tree full");
-    return BigInt(this.#leaves.push(cm) - 1);
+  /** Appends a leaf and returns its index. */
+  append(leaf: bigint): bigint {
+    if (this.#leaves.length >= 2 ** this.depth) throw new Error("tree full");
+    return BigInt(this.#leaves.push(leaf) - 1);
   }
 
   root(): bigint {
     this.#rehash();
-    return this.#leaves.length === 0 ? ZEROS[DEPTH] : this.#levels[DEPTH][0];
+    return this.#leaves.length === 0 ? ZEROS[this.depth] : this.#levels[this.depth][0];
   }
 
   /** The path of any index; one past the last leaf gives an empty slot's path. */
   authPath(index: bigint): AuthPath {
     this.#rehash();
-    return pathOf(index, (d, position) =>
-      position < BigInt(this.#levels[d].length) ? this.#levels[d][Number(position)] : ZEROS[d],
-    );
+    const node = (d: number, position: bigint) =>
+      position < BigInt(this.#levels[d].length) ? this.#levels[d][Number(position)] : ZEROS[d];
+    return pathOf(index, node, this.depth);
   }
 
   #rehash(): void {
     const first = this.#hashed;
     if (first === this.#leaves.length) return;
-    for (let d = 0; d < DEPTH; d++) {
+    for (let d = 0; d < this.depth; d++) {
       const below = this.#levels[d];
       const above = this.#levels[d + 1];
       for (let j = first >> (d + 1); 2 * j < below.length; j++) {
@@ -178,7 +194,11 @@ export interface Witness {
   alpha: string;
   root: string;
   domain: string;
-  in_spend_key: string[];
+  owner_root: string;
+  owner: string;
+  owner_siblings: string[];
+  owner_bits: string[];
+  in_nk: string[];
   in_rho: string[];
   in_value: string[];
   in_siblings: string[][];
@@ -191,10 +211,19 @@ export interface Witness {
   authorizer: string;
 }
 
+/** The leaf of an owner set a spend reveals: the set's root, the address and its path. */
+export interface OwnerLeaf {
+  root: bigint;
+  address: bigint;
+  path: AuthPath;
+}
+
 /** The public terms of a spend besides its notes. */
 export interface SpendTerms {
   /** The spend's one-time signer, as an address integer. */
   authorizer: bigint;
+  /** The owner set both inputs belong to, and the address in it that signs the spend. */
+  owner: OwnerLeaf;
   publicAmount?: bigint;
   fee?: bigint;
   /** The withdrawal's recipient as an address integer, 0 when nothing is withdrawn. */
@@ -207,11 +236,12 @@ function check(condition: boolean, message: string): void {
 }
 
 /**
- * A join-split witness against the tree's current root. inputs are exactly two notes, a
- * dummyInput (value 0, no index) in place of a missing one; outputs are exactly two
- * (inner, value) pairs, a zero-value output being its position's sink. Values must conserve
- * exactly: sum(inputs) = sum(outputs) + publicAmount + fee. The tree is not checked to hold
- * the inputs, and the same note may fill both inputs: the circuit refuses those witnesses.
+ * A join-split witness against the tree's current root. inputs are exactly two notes of the
+ * owner set terms.owner names, a dummyInput (value 0, no index) in place of a missing one;
+ * outputs are exactly two (inner, value) pairs, a zero-value output being its position's sink.
+ * Values must conserve exactly: sum(inputs) = sum(outputs) + publicAmount + fee. Neither tree is
+ * checked to hold its leaf, and the same note may fill both inputs: the circuit refuses those
+ * witnesses.
  */
 export function buildWitness(
   tree: MerkleTree,
@@ -220,7 +250,7 @@ export function buildWitness(
   domain: bigint,
   terms: SpendTerms,
 ): Witness {
-  const { authorizer, publicAmount = 0n, fee = 0n, recipient = 0n } = terms;
+  const { authorizer, owner, publicAmount = 0n, fee = 0n, recipient = 0n } = terms;
   check(inputs.length === 2 && outputs.length === 2, "a spend has two inputs and two outputs");
   check(
     inputs.some((i) => i.value > 0n),
@@ -239,6 +269,11 @@ export function buildWitness(
     "every value must be in [0, 2^128)",
   );
   check(authorizer > 0n && authorizer < 1n << 160n, "the authorizer must be a nonzero address");
+  check(owner.address > 0n && owner.address < 1n << 160n, "the owner must be a nonzero address");
+  check(
+    owner.path.siblings.length === OWNER_DEPTH && owner.path.bits.length === OWNER_DEPTH,
+    `an owner's path has ${OWNER_DEPTH} levels`,
+  );
   outputs.forEach(([out, value], k) => {
     // The circuit reduces inners mod p, so the sink checks below hold only for canonical ones.
     check(out >= 0n && out < P, "every output inner must be in [0, p)");
@@ -248,11 +283,10 @@ export function buildWitness(
   const [outCm1, outCm2] = outputCommitments(outputs);
   check(outCm1 !== outCm2, "output commitments must be distinct");
 
-  const [nf1, nf2] = inputNullifiers(domain, inputs);
+  const [nf1, nf2] = inputNullifiers(domain, owner.root, inputs);
   const root = tree.root();
-  const alpha = compressionAlpha(
-    statement({ nf1, nf2, outCm1, outCm2, root, domain, publicAmount, fee, recipient, authorizer }),
-  );
+  const given = { publicAmount, fee, recipient, authorizer, owner: owner.address };
+  const alpha = compressionAlpha(statement({ nf1, nf2, outCm1, outCm2, root, domain, ...given }));
   const paths = inputs.map((i) =>
     i.idx === null
       ? { siblings: Array<bigint>(DEPTH).fill(0n), bits: Array<number>(DEPTH).fill(0) }
@@ -263,7 +297,11 @@ export function buildWitness(
     alpha: String(alpha),
     root: String(root),
     domain: String(domain),
-    in_spend_key: decimal(inputs.map((i) => i.sk)),
+    owner_root: String(owner.root),
+    owner: String(owner.address),
+    owner_siblings: decimal(owner.path.siblings),
+    owner_bits: decimal(owner.path.bits),
+    in_nk: decimal(inputs.map((i) => i.nk)),
     in_rho: decimal(inputs.map((i) => i.rho)),
     in_value: decimal(inputs.map((i) => i.value)),
     in_siblings: paths.map((path) => decimal(path.siblings)),
