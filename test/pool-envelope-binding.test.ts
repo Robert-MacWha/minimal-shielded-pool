@@ -1,8 +1,9 @@
 /**
  * The one-time authorizer's signature binds the complete intent of a spend: every envelope
- * field, every proof word, every settlement word and note, the recent-root tuple, and the
- * optional fourth frame. Each mutation below must change the signature hash, and the original
- * signature must not authorize the mutated transaction. Runs in about 0.6 s.
+ * field, every proof word, every settlement word and note, the recent-root tuple, the optional
+ * fourth frame and the owner's signature. Each mutation below must change the signature hash,
+ * and the original signature must not authorize the mutated transaction. The owner's signature
+ * a fixture records is sent only for the chain, pool and intent it signs. Runs in about 0.6 s.
  *
  *   node --test test/pool-envelope-binding.test.ts
  */
@@ -10,21 +11,25 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 
-import { compareBigint, keccak, toHex } from "../src/bytes.ts";
+import { compareBigint, concat, fromHex, keccak, toBigint, toBytes, toHex } from "../src/bytes.ts";
 import {
   parsePrivateKey,
   rawTx,
   recoverSigner,
   SCHEME,
+  SECP256K1_N,
   sigHash,
+  signHash,
   type FrameTx,
 } from "../src/frametx.ts";
 import { parse } from "../src/json.ts";
 import { InputError, PoolError } from "../src/errors.ts";
-import { recentRootTuple, sourceId } from "../src/protocol.ts";
+import { intentDigest, recentRootTuple, sourceId } from "../src/protocol.ts";
 import {
   authorizerKey,
   entryProofBytes,
+  ownerSignature,
+  parseSpend,
   settleCalldata,
   signTransaction,
   spendFrames,
@@ -242,4 +247,110 @@ test("refuses spend entry fields written in a loose form", () => {
   const [x, y] = (entry.proof as Entry).pA as string[];
   const proof = { ...(entry.proof as Entry), pA: { 0: x, 1: y } };
   assert.throws(() => entryProofBytes({ ...entry, proof }), /proof pA must be 0x-prefixed hex/);
+});
+
+// The committed fixture's spends carry the owner's signature, after the authorizer's.
+const smoke = parse(
+  readFileSync(new URL("fixtures/smoke_fixture.json", import.meta.url), "utf8"),
+) as Record<string, unknown>;
+const SMOKE_CHAIN = BigInt(smoke.chain_id as number);
+const SMOKE_POOL = BigInt(smoke.pool_address as string);
+
+/** The committed fixture's transfer with root_slot 1, signed by its authorizer and its owner. */
+function ownerSigned(): FrameTx {
+  const entry: Entry = { ...structuredClone(smoke.transfer as Entry), root_slot: "1" };
+  const settle = settleCalldata(entry, entry.root_slot);
+  const source = sourceId(SMOKE_POOL, BigInt(entry.epoch as number));
+  const recentRoot = recentRootTuple(source, 1n, BigInt(entry.root as string));
+  const frames = spendFrames({
+    pool: SMOKE_POOL,
+    recentRoot,
+    proof: entryProofBytes(entry),
+    settle,
+  });
+  const tx: FrameTx = {
+    chainId: SMOKE_CHAIN,
+    nonceKeys: spendNonceKeys(settle),
+    nonceSeq: 0n,
+    sender: SMOKE_POOL,
+    frames,
+    signatures: [],
+    maxPriorityFee: 1n,
+    maxFee: 10n,
+    maxBlobFee: 0n,
+    blobHashes: [],
+  };
+  const owner = ownerSignature(entry, SMOKE_CHAIN, SMOKE_POOL);
+  return signTransaction(tx, authorizerKey(entry), owner);
+}
+
+test("the authorizer's signature binds the owner's signature, which comes second", () => {
+  const tx = ownerSigned();
+  const [authorizer, owner] = tx.signatures;
+  const original = sigHash(tx);
+  assert.equal(recoverSigner(original, authorizer.signature), authorizer.signer);
+  // The owner signs the intent digest it carries, not the transaction hash.
+  assert.equal(recoverSigner(owner.msg, owner.signature), owner.signer);
+  const ownerMutations: Mutation[] = [
+    ["owner_scheme", (x) => void (x.signatures[1].scheme = SCHEME.P256)],
+    ["owner_signer", (x) => void (x.signatures[1].signer ^= 1n)],
+    ["owner_message", (x) => void (x.signatures[1].msg[31] ^= 1)],
+    ["owner_signature", (x) => void (x.signatures[1].signature[64] ^= 1)],
+    ["owner_removed", (x) => void x.signatures.pop()],
+    ["owner_repeated", (x) => void x.signatures.push(structuredClone(x.signatures[1]))],
+  ];
+  for (const [field, mutate] of ownerMutations) {
+    const candidate = structuredClone(tx);
+    mutate(candidate);
+    const hash = sigHash(candidate);
+    assert.notEqual(hex(hash), hex(original), `signature hash did not bind ${field}`);
+    assert.notEqual(recoverSigner(hash, authorizer.signature), authorizer.signer, field);
+  }
+  // Only the authorizer's own bytes, which sign the hash, are left out of it.
+  const resigned = structuredClone(tx);
+  resigned.signatures[0].signature[1] ^= 1;
+  assert.equal(hex(sigHash(resigned)), hex(original));
+});
+
+test("an owner signature is sent only for the chain, pool and intent it signs", () => {
+  const entry = smoke.transfer as Entry;
+  const owner = ownerSignature(entry, SMOKE_CHAIN, SMOKE_POOL);
+  const spend = parseSpend(entry, 0n);
+  assert.deepEqual(owner.msg, intentDigest(SMOKE_CHAIN, SMOKE_POOL, spend));
+  assert.equal(owner.signer, BigInt(entry.owner as string));
+  const signature = fromHex(entry.owner_signature, "the owner signature");
+  const n = SECP256K1_N;
+  // The same signature with s mirrored and v flipped recovers the same key, but EIP-8141 takes
+  // only low s.
+  const s = toBigint(signature.subarray(33));
+  const mirrored = concat(
+    Uint8Array.of(signature[0] ^ 1),
+    signature.subarray(1, 33),
+    toBytes(n - s, 32),
+  );
+  assert.equal(recoverSigner(owner.msg, mirrored), owner.signer);
+  const other = signHash(owner.msg, new Uint8Array(32).fill(7));
+  const refusals: [string, unknown, bigint, bigint][] = [
+    ["another chain", entry, SMOKE_CHAIN + 1n, SMOKE_POOL],
+    ["another pool", entry, SMOKE_CHAIN, SMOKE_POOL ^ 1n],
+    ["another fee", { ...entry, fee: String(spend.fee + 1n) }, SMOKE_CHAIN, SMOKE_POOL],
+    ["another key", { ...entry, owner_signature: toHex(other) }, SMOKE_CHAIN, SMOKE_POOL],
+    ["high s", { ...entry, owner_signature: toHex(mirrored) }, SMOKE_CHAIN, SMOKE_POOL],
+    [
+      "v = 2",
+      { ...entry, owner_signature: toHex(Uint8Array.of(2, ...signature.subarray(1))) },
+      SMOKE_CHAIN,
+      SMOKE_POOL,
+    ],
+  ];
+  for (const [label, changed, chain, pool] of refusals) {
+    assert.throws(
+      () => ownerSignature(changed, chain, pool),
+      (error) =>
+        error instanceof PoolError && /does not sign this spend's intent/.test(error.message),
+      label,
+    );
+  }
+  const short = { ...entry, owner_signature: toHex(signature.subarray(1)) };
+  assert.throws(() => ownerSignature(short, SMOKE_CHAIN, SMOKE_POOL), InputError);
 });

@@ -26,6 +26,7 @@ import { buildAndSend, waitPublishedSlot, type SendIo } from "../send.ts";
 import {
   authorizerKey,
   entryProofBytes,
+  ownerSignature,
   parseRecentRoot,
   settleCalldata,
   shieldCalldata,
@@ -284,10 +285,11 @@ export async function main(argv: readonly string[], deps: Deps = {}): Promise<vo
   const root = parseRecentRoot(source, rootSlot);
   const recentRoot = await recentRootReference(node, poolAddress, root);
   const key = authorizerKey(source);
+  const owner = ownerSignature(source, chainId, poolAddress);
   const settle = settleCalldata(source, rootSlot);
   io.log(`join-split ${op} via frame tx (pool ${cfg.pool} self-pays)`);
   const proof = entryProofBytes(source);
-  const fields = { settle, proof, recentRoot, action, omitTail, allowFailedClaim };
+  const fields = { settle, proof, recentRoot, owner, action, omitTail, allowFailedClaim };
   const sendOptions = { dryRun, maxFee, maxPriorityFee };
   await sendTx(node, io, key, poolAddress, { kind: "spend", ...fields }, sendOptions);
 }

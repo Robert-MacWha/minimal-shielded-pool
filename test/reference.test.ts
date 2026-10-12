@@ -14,6 +14,7 @@ import { InputError, NotesError, UserError } from "../src/errors.ts";
 import * as ft from "../src/frametx.ts";
 import * as gas from "../src/gas.ts";
 import * as notes from "../src/notes.ts";
+import { OwnerSet } from "../src/owner.ts";
 import { poseidon } from "../src/poseidon.ts";
 import * as pr from "../src/protocol.ts";
 import * as spend from "../src/spend.ts";
@@ -128,20 +129,24 @@ describe("protocol hashes (protocol.json)", () => {
 
   groups(v, {
     poseidon: [(c) => poseidon(bigs(c.in)), RangeError],
+    // The Python client's owner key, Poseidon(1, spend_key, 0), is the owner key of the owner
+    // set with root spend_key under the nullifier key 0, so these cases still pin its hashes.
     notes: [
       (c) => {
         const { sk, rho, value } = bigs(c.in);
-        const commitment = pr.commitment(sk, rho, value);
-        return { ownerPk: pr.ownerPk(sk), inner: pr.inner(sk, rho), commitment };
+        const ownerPk = pr.ownerPk(sk, 0n);
+        const commitment = pr.commitment(ownerPk, rho, value);
+        return { ownerPk, inner: pr.inner(ownerPk, rho), commitment };
       },
     ],
+    // The Python client derived the nullifier from the spend key as this one does from nk.
     nullifiers: [
       (c) => {
-        const { domain, sk, cm, index } = bigs(c.in);
-        if ("error" in c) return pr.nullifier(domain, sk, cm, index);
-        const key = pr.nullifierKey(domain, sk);
+        const { domain, sk: nk, cm, index } = bigs(c.in);
+        if ("error" in c) return pr.nullifier(domain, nk, cm, index);
+        const key = pr.domainKey(domain, nk);
         const fromKey = pr.nullifierFromKey(key, cm, index);
-        return { key, nullifier: pr.nullifier(domain, sk, cm, index), fromKey };
+        return { key, nullifier: pr.nullifier(domain, nk, cm, index), fromKey };
       },
       InputError,
     ],
@@ -167,7 +172,7 @@ describe("protocol hashes (protocol.json)", () => {
     fingerprints: [(c) => pr.fingerprint(big(c.in.sigma), bigs(c.in.stmt))],
     spendHashes: [
       ({ in: s }) => ({
-        nullifiers: pr.inputNullifiers(big(s.domain), bigs(s.inputs)),
+        nullifiers: pr.inputNullifiers(big(s.domain), big(s.owner_root), bigs(s.inputs)),
         commitments: pr.outputCommitments(bigs(s.outputs)),
       }),
     ],
@@ -243,10 +248,17 @@ describe("trees and witnesses (wallet.json)", () => {
     outcome(v.fullTree, () => tree.append(big(leaf)), "own");
   });
 
-  const witness = (c: Json, leaves = c.leaves, domain = c.domain) => {
+  /** A witness from a case; the owner set and its leaf come from `owner`, the first case's. */
+  const witness = (c: Json, { leaves, domain, owner } = c) => {
     const tree = new Tree();
     for (const leaf of leaves) tree.append(big(leaf));
-    return buildWitness(tree, bigs(c.inputs), bigs(c.outputs), big(domain), bigs(c.terms));
+    const terms = {
+      ...bigs(c.terms),
+      owner: new OwnerSet(bigs(owner.addresses)).leaf(owner.index),
+    };
+    // The Python client's error cases name each input's nullifier key spend_key.
+    const inputs = c.inputs.map(({ sk, ...input }: Json) => bigs({ nk: input.nk ?? sk, ...input }));
+    return buildWitness(tree, inputs, bigs(c.outputs), big(domain), terms);
   };
 
   test("full circuit witnesses", () => each(v.witnesses, (c) => same(witness(c), c.witness)));
@@ -255,8 +267,7 @@ describe("trees and witnesses (wallet.json)", () => {
   // witness builder's: a later step refusing the same input (compressionAlpha on a negative
   // word) does not count.
   test("witnesses the circuit would refuse", () => {
-    const { leaves, domain } = v.witnesses[0];
-    outcomes(v.witnessErrors, (c) => witness(c, leaves, domain), "own");
+    outcomes(v.witnessErrors, (c) => witness(c, v.witnesses[0]), "own");
   });
 });
 
@@ -463,12 +474,18 @@ describe("pool calldata (abi.json)", () => {
     domainCall: [(c) => pr.encodeDomainCall(big(c.epoch)), InputError],
     claim: [(c) => pr.encodeClaim(big(c.recipient)), InputError],
     proofBytes: [(c) => spend.entryProofBytes(c.entry), InputError],
-    // The compressed signals [beta, gamma, alpha], with the right gamma and one off by one.
+    // The compressed signals [beta, gamma, alpha], with the right gamma and one off by one. The
+    // Python client's statement had ten values, so alpha is computed here as it computed it.
     verifierCalls: [
       ({ transfer: t }) => {
         const keys = "nf1 nf2 out_cm1 out_cm2 root domain public_amount fee recipient authorizer";
         const stmt = keys.split(" ").map((key) => big(t[key]));
-        const [alpha, beta] = [pr.compressionAlpha(stmt), big(t.beta)];
+        const words = Buffer.from(
+          stmt.map((x) => x.toString(16).padStart(64, "0")).join(""),
+          "hex",
+        );
+        const alpha = BigInt(hex(keccak_256(words))) % pr.P;
+        const beta = big(t.beta);
         const gamma = pr.fingerprint((alpha + beta) % pr.P, stmt);
         const call = (g: bigint) => pr.verifyProofCall(bigs(t.proof), [beta, g, alpha]);
         return [call(gamma), call((gamma + 1n) % pr.P)];
@@ -487,7 +504,8 @@ describe("pool calldata (abi.json)", () => {
 
 describe("note delivery primitives (notes.json)", () => {
   const v = load("notes.json");
-  const keysOf = (w: Json) => new notes.WalletKeys(bytes(w.seed), big(w.account));
+  const keysOf = (w: Json) =>
+    new notes.WalletKeys(bytes(w.seed), big(w.owner_root), big(w.account));
   const walletOf = (name: string) => keysOf(v.wallets.find((w: Json) => w.name === name));
   const partsOf = (parts: Json[]) => parts.map((p) => ("int" in p ? big(p.int) : bytes(p.bytes)));
   const prf = (c: Json) => {
@@ -504,12 +522,12 @@ describe("note delivery primitives (notes.json)", () => {
   test("keys, addresses and direct secrets from a seed", () =>
     each(v.wallets, (c) => {
       const keys = keysOf(c);
-      const { root, spendKey, ownerPk, selfSecret } = keys;
+      const { root, nk, ownerPk, selfSecret } = keys;
       const address = keys.address().encode();
       const numbers = Object.keys(c.out.directSecrets);
       const directSecrets = Object.fromEntries(numbers.map((n) => [n, keys.directSecret(big(n))]));
       const addressKeccak = keccak_256(address);
-      const got: Json = { root, spendKey, ownerPk, selfSecret, addressKeccak, directSecrets };
+      const got: Json = { root, nk, ownerPk, selfSecret, addressKeccak, directSecrets };
       if ("address" in c.out) got.address = address;
       same(got, c.out);
     }));
@@ -566,7 +584,7 @@ describe("note delivery primitives (notes.json)", () => {
         note,
         rho,
         tag: notes.noteTag(secret, index),
-        outputCommitment: notes.outputCommitment(ownerPk, rho, value),
+        outputCommitment: pr.commitment(ownerPk, rho, value),
         opened: open(),
         wrongIndex: open(note, secret, (index + 1n) % 2n ** 256n),
         wrongSecret: open(note, Uint8Array.of(secret[0] ^ 1, ...secret.subarray(1))),

@@ -11,8 +11,9 @@
  * block, in either order. That is the property under test.
  *
  * Alice pays Bob through his public address and Carol pays Dave with a secret Dave handed her
- * out of band. Against a live pool (--rpc), the tree is first rebuilt from the pool's leaves,
- * so the fixture's root is the one the pool will hold after both shields land.
+ * out of band. Each wallet's owner set is held by a software owner, whose seed the fixture
+ * records. Against a live pool (--rpc), the tree is first rebuilt from the pool's leaves, so the
+ * fixture's root is the one the pool will hold after both shields land.
  */
 import assert from "node:assert/strict";
 import { join } from "node:path";
@@ -21,6 +22,7 @@ import { hex32, hexPadded, keccak, parseAddress, parseHex, toHex } from "./bytes
 import { GeneratorError } from "./errors.ts";
 import * as fixtures from "./fixtures.ts";
 import * as notes from "./notes.ts";
+import { SoftwareOwner } from "./owner.ts";
 import * as protocol from "./protocol.ts";
 import { secureRng, seededRng } from "./random.ts";
 import { rpc } from "./rpc.ts";
@@ -116,12 +118,16 @@ export async function generateNonceRace(options: NonceRaceOptions, deps: fixture
   if (url !== undefined && parseHex(await call("eth_chainId", []), "eth_chainId") !== chainId) {
     throw new GeneratorError("--chain-id does not match the chain --rpc reads");
   }
-  const domain = protocol.domainScalar(chainId, parseAddress(poolAddress, "--pool-address"), epoch);
+  const pool = parseAddress(poolAddress, "--pool-address");
+  const domain = protocol.domainScalar(chainId, pool, epoch);
 
   const label = (name: string) =>
     keccak(new TextEncoder().encode(`minimal-shielded-pool:nonce-race:${name}:v1`));
-  const seeds = NAMES.map((name) => (options.random ? rng.bytes(32) : label(name)));
-  const keys = seeds.map((seed) => new notes.WalletKeys(seed));
+  const seed = (name: string) => (options.random ? rng.bytes(32) : label(name));
+  const seeds = NAMES.map(seed);
+  const ownerSeeds = NAMES.map((name) => seed(`${name}-owner`));
+  const owners = ownerSeeds.map((s) => new SoftwareOwner(s, fixtures.OWNER_LEAVES));
+  const keys = seeds.map((s, i) => new notes.WalletKeys(s, owners[i].set.root));
   const [alice, bob, carol, dave] = keys;
   const aliceSelf = notes.directChannel(alice.ownerPk, alice.selfSecret);
   const carolSelf = notes.directChannel(carol.ownerPk, carol.selfSecret);
@@ -129,8 +135,8 @@ export async function generateNonceRace(options: NonceRaceOptions, deps: fixture
   // Two deposits into one tree, whose root R is fixed once both are in.
   const a = notes.reserve(aliceSelf, v);
   const c = notes.reserve(carolSelf, v);
-  const cmA = protocol.commitment(alice.spendKey, a.rho, v);
-  const cmC = protocol.commitment(carol.spendKey, c.rho, v);
+  const cmA = protocol.commitment(alice.ownerPk, a.rho, v);
+  const cmC = protocol.commitment(carol.ownerPk, c.rho, v);
   let tree = new Tree();
   if (url !== undefined) {
     tree = await seededTree(call, poolAddress, epoch);
@@ -150,6 +156,7 @@ export async function generateNonceRace(options: NonceRaceOptions, deps: fixture
   // The sender's deposit and a dummy, into the payee's note and the sender's change.
   const transfer = async (
     sender: notes.WalletKeys,
+    device: SoftwareOwner,
     deposit: Reserved,
     index: bigint,
     payee: notes.WalletKeys,
@@ -157,22 +164,23 @@ export async function generateNonceRace(options: NonceRaceOptions, deps: fixture
     change: Reserved,
     tag: string,
   ) => {
-    const inputs = [
-      { sk: sender.spendKey, rho: deposit.rho, value: v, idx: index },
-      dummyInput(rng),
-    ];
+    const inputs = [{ nk: sender.nk, rho: deposit.rho, value: v, idx: index }, dummyInput(rng)];
     const outputs = [
-      [protocol.inner(payee.spendKey, paid.rho), vBob] as const,
-      [protocol.inner(sender.spendKey, change.rho), vChange] as const,
+      [protocol.inner(payee.ownerPk, paid.rho), vBob] as const,
+      [protocol.inner(sender.ownerPk, change.rho), vChange] as const,
     ];
     const [key, authorizer] = newAuthorizer(rng);
-    const terms = { epoch, authorizer, authorizerKey: key, fee: vFee };
+    const signing = { owner: device.nextLeaf(), device, chainId, pool };
+    const terms = { epoch, authorizer, authorizerKey: key, fee: vFee, ...signing };
     const proved = await prover.prove(buildWitness(tree, inputs, outputs, domain, terms), tag);
     // No later spend records these outputs, so their openings go with the transfer.
-    const openings = [
-      { spend_key: hex32(payee.spendKey), rho: hex32(paid.rho), value: String(vBob) },
-      { spend_key: hex32(sender.spendKey), rho: hex32(change.rho), value: String(vChange) },
-    ];
+    const opening = (owner: notes.WalletKeys, rho: bigint, value: bigint) => ({
+      owner_root: hex32(owner.ownerRoot),
+      nk: hex32(owner.nk),
+      rho: hex32(rho),
+      value: String(value),
+    });
+    const openings = [opening(payee, paid.rho, vBob), opening(sender, change.rho, vChange)];
     return fixtures.spendEntry(tree, domain, inputs, outputs, terms, proved, {
       output_openings: openings,
       notes: toHex(notes.spendNotes(paid.note, change.note, paid.ciphertext)),
@@ -183,16 +191,16 @@ export async function generateNonceRace(options: NonceRaceOptions, deps: fixture
   // the secret he handed Carol.
   const toBob = notes.reserve(notes.openChannel(bob.address()), vBob);
   const changeA = notes.reserve(aliceSelf, vChange);
-  const ea = await transfer(alice, a, idxA, bob, toBob, changeA, "race_a");
+  const ea = await transfer(alice, owners[0], a, idxA, bob, toBob, changeA, "race_a");
   const toDave = notes.reserve(notes.directChannel(dave.ownerPk, dave.directSecret(0n)), vBob);
   const changeC = notes.reserve(carolSelf, vChange);
-  const ec = await transfer(carol, c, idxC, dave, toDave, changeC, "race_c");
+  const ec = await transfer(carol, owners[2], c, idxC, dave, toDave, changeC, "race_c");
   const disjoint = ![ea.nf1, ea.nf2].some((nf) => nf === ec.nf1 || nf === ec.nf2);
   assert(disjoint, "transfers must consume disjoint nullifiers");
   assert(ea.root === hex32(rootR) && ec.root === ea.root, "both transfers bind the same root");
 
-  const shield = (cm: bigint, sk: bigint, note: Reserved, leaf: bigint, prior: bigint) => ({
-    inner: hex32(protocol.inner(sk, note.rho)),
+  const shield = (cm: bigint, pk: bigint, note: Reserved, leaf: bigint, prior: bigint) => ({
+    inner: hex32(protocol.inner(pk, note.rho)),
     cm: hex32(cm),
     value: String(v),
     leaf,
@@ -206,11 +214,20 @@ export async function generateNonceRace(options: NonceRaceOptions, deps: fixture
     domain: hex32(domain),
     root: hex32(rootR),
     shields: [
-      shield(cmA, alice.spendKey, a, idxA, priorA),
-      shield(cmC, carol.spendKey, c, idxC, priorC),
+      shield(cmA, alice.ownerPk, a, idxA, priorA),
+      shield(cmC, carol.ownerPk, c, idxC, priorC),
     ],
     wallets: Object.fromEntries(
-      NAMES.map((name, i) => [name, { seed: toHex(seeds[i]), address: keys[i].address().hex() }]),
+      NAMES.map((name, i) => [
+        name,
+        {
+          seed: toHex(seeds[i]),
+          owner_seed: toHex(ownerSeeds[i]),
+          owner_leaves: fixtures.OWNER_LEAVES,
+          owner_root: hex32(keys[i].ownerRoot),
+          address: keys[i].address().hex(),
+        },
+      ]),
     ),
     // The pool CLI reads a spend entry by its key; both are transfers.
     transfer: ea,

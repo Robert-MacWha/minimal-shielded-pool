@@ -33,14 +33,14 @@ contract VerifierCanonicalTest {
         out[1] = uint256(vm.parseBytes32(values[1]));
     }
 
-    // Hybrid compression, as the dispatcher computes it: alpha hashes the ten
+    // Hybrid compression, as the dispatcher computes it: alpha hashes the eleven
     // statement words, gamma evaluates them at alpha + beta, and the verifier
     // takes (beta, gamma, alpha).
-    function _compress(uint256[10] memory s, uint256 beta) internal pure returns (uint256[3] memory input) {
+    function _compress(uint256[11] memory s, uint256 beta) internal pure returns (uint256[3] memory input) {
         uint256 alpha = uint256(keccak256(abi.encodePacked(s))) % P;
         uint256 sigma = addmod(alpha, beta, P);
         uint256 gamma;
-        for (uint256 i = 10; i > 0; i--) {
+        for (uint256 i = 11; i > 0; i--) {
             gamma = addmod(mulmod(gamma, sigma, P), s[i - 1], P);
         }
         input = [beta, gamma, alpha];
@@ -49,7 +49,7 @@ contract VerifierCanonicalTest {
     function _vector()
         internal
         view
-        returns (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[10] memory s, uint256 beta)
+        returns (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[11] memory s, uint256 beta)
     {
         a = _pair(".transfer.proof.pA");
         b = [_pair(".transfer.proof.pB[0]"), _pair(".transfer.proof.pB[1]")];
@@ -64,19 +64,20 @@ contract VerifierCanonicalTest {
             _u(".transfer.public_amount"),
             _u(".transfer.fee"),
             _u(".transfer.recipient"),
-            _u(".transfer.authorizer")
+            _u(".transfer.authorizer"),
+            _u(".transfer.owner")
         ];
         beta = _u(".transfer.beta");
     }
 
     function test_valid_fixture_verifies() public view {
-        (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[10] memory s, uint256 beta) =
+        (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[11] memory s, uint256 beta) =
             _vector();
         require(verifier.verifyProof(a, b, c, _compress(s, beta)), "valid proof rejected");
     }
 
     function test_noncanonical_coordinate_alias_is_rejected() public view {
-        (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[10] memory s, uint256 beta) =
+        (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[11] memory s, uint256 beta) =
             _vector();
         require(a[1] <= type(uint256).max - Q, "fixture cannot form alias");
         a[1] += Q;
@@ -84,15 +85,15 @@ contract VerifierCanonicalTest {
     }
 
     function test_infinity_is_rejected() public view {
-        (, uint256[2][2] memory b, uint256[2] memory c, uint256[10] memory s, uint256 beta) = _vector();
+        (, uint256[2][2] memory b, uint256[2] memory c, uint256[11] memory s, uint256 beta) = _vector();
         uint256[2] memory zeroA;
         require(!verifier.verifyProof(zeroA, b, c, _compress(s, beta)), "point at infinity accepted");
     }
 
     function test_each_statement_value_is_bound() public view {
-        (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[10] memory s, uint256 beta) =
+        (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[11] memory s, uint256 beta) =
             _vector();
-        for (uint256 i; i < 10; i++) {
+        for (uint256 i; i < 11; i++) {
             uint256 original = s[i];
             s[i] = addmod(original, 1, P);
             require(!verifier.verifyProof(a, b, c, _compress(s, beta)), "statement mutation accepted");
@@ -101,7 +102,7 @@ contract VerifierCanonicalTest {
     }
 
     function test_beta_and_gamma_are_bound() public view {
-        (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[10] memory s, uint256 beta) =
+        (uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[11] memory s, uint256 beta) =
             _vector();
         require(!verifier.verifyProof(a, b, c, _compress(s, addmod(beta, 1, P))), "beta mutation accepted");
         uint256[3] memory input = _compress(s, beta);

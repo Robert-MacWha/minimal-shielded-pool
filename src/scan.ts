@@ -1,11 +1,12 @@
 /**
  * Receiving notes: a wallet finds its notes, and their spends, in the pool's finalized logs from
- * its seed alone. src/notes.ts defines the notes and the secrets that seal them. This module reads
- * the pool's logs from a node, from where the last scan stopped to the finalized head, by
- * eth_getLogs or, where the node leaves logs out, from block receipts. It groups them into one
- * event per shield or settlement, matches each note's tag against the secrets the wallet watches,
- * and turns what it found into the contents of the wallet's state file, from which a later scan
- * resumes. src/cli/notes.ts reads and writes that file under a lock.
+ * its seed and its owner set's root. src/notes.ts defines the notes and the secrets that seal
+ * them. This module reads the pool's logs from a node, from where the last scan stopped to the
+ * finalized head, by eth_getLogs or, where the node leaves logs out, from block receipts. It
+ * groups them into one event per shield or settlement, matches each note's tag against the
+ * secrets the wallet watches, and turns what it found into the contents of the wallet's state
+ * file, from which a later scan resumes. src/cli/notes.ts reads and writes that file under a
+ * lock.
  */
 import * as crypto from "node:crypto";
 
@@ -101,7 +102,7 @@ function shortClosedEpoch(tree: ReadonlyMap<bigint, bigint>): bigint | null {
 }
 
 /**
- * Finds a wallet's notes and their spends in the pool's finalized events, from its seed. Each
+ * Finds a wallet's notes and their spends in the pool's finalized events, from its keys. Each
  * epoch's leaves must arrive without gaps, and the next epoch may begin only with a call whose
  * leaves did not fit, so a node that left a payment's logs out stops the scan instead of hiding
  * the payment. The exception is a payment in an epoch's last leaf when a two-leaf call begins the
@@ -235,13 +236,13 @@ export class Scanner {
     const value = openNote(incoming.secret, noteIndex, note);
     if (value === null) return null;
     const rho = noteRho(incoming.secret, noteIndex);
-    const cm = protocol.commitment(this.keys.spendKey, rho, value);
+    const cm = protocol.commitment(this.keys.ownerPk, rho, value);
     const leaf = leaves.find((l) => l.cm === cm);
     // A note naming no output of its own event pays nobody, and none is counted twice.
     if (leaf === undefined || this.notes.has(placeOf(leaf))) return null;
     const { epoch, index } = leaf;
     const domain = protocol.domainScalar(this.chainId, this.pool, epoch);
-    const nullifier = protocol.nullifier(domain, this.keys.spendKey, cm, index);
+    const nullifier = protocol.nullifier(domain, this.keys.nk, cm, index);
     const { kind } = incoming;
     const record = this.#record({ cm, epoch, index, value, rho, nullifier, spent: false, kind });
     if (noteIndex + 1n > incoming.nextIndex) {

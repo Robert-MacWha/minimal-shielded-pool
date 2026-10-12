@@ -3,9 +3,9 @@
  * the nonce-race generator proves against it: duplicate commitments stay distinct leaves in
  * logged index order, other epochs' logs are ignored, and a mismatched epoch, gap or root stops
  * it. The smoke fixture's openings reproduce its nullifiers, Tree matches the incremental-tree
- * vectors, a new note's secrets are distinct field elements, an authorizer key is never zero,
- * each zero output must use its own position's sink, and an output inner must be below p.
- * Runtime: about 0.2 s.
+ * vectors at both depths, a new note's secrets are distinct field elements, an authorizer key is
+ * never zero, each zero output must use its own position's sink, an output inner must be below
+ * p, and the owner must be a nonzero address with a depth-16 path. Runtime: about 0.2 s.
  */
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -13,11 +13,14 @@ import { test } from "node:test";
 
 import { word } from "../src/bytes.ts";
 import { seededTree, type Call } from "../src/nonce-race.ts";
+import { OwnerSet } from "../src/owner.ts";
 import {
   LEAF_APPENDED,
+  OWNER_DEPTH,
   P,
   commitment,
   inputNullifiers,
+  ownerPk,
   p2,
   sinkOutputs,
   type Output,
@@ -77,6 +80,8 @@ const keeps = async (leaves: bigint[], pool?: Pool) =>
 const refuses = (leaves: bigint[], pool: Pool, message: RegExp) =>
   assert.rejects(rebuild(leaves, pool), { name: "GeneratorError", message });
 
+/** A one-address owner set's leaf, for witnesses whose owner does not matter. */
+const OWNER = new OwnerSet([0xabcn]).leaf(0);
 const cm = commitment(123n, 456n, 100n);
 const other = commitment(321n, 654n, 200n);
 
@@ -96,17 +101,22 @@ test("the smoke fixture's input openings reproduce its nullifiers", () => {
   // After another deposit changes the tree, only these openings let the owner prove the same
   // spend, with the same nullifiers, on a newer root.
   const fixture = json("fixtures/smoke_fixture.json");
-  const open = (i: { spend_key: string; rho: string; value: string; leaf: number | null }) => {
-    const [sk, rho, value] = [i.spend_key, i.rho, i.value].map(BigInt);
-    return { sk, rho, value, idx: i.leaf === null ? null : BigInt(i.leaf) };
+  type Opening = { owner_root: string; nk: string; rho: string; value: string };
+  const open = (i: Opening & { leaf: number | null }) => {
+    const [nk, rho, value] = [i.nk, i.rho, i.value].map(BigInt);
+    return { nk, rho, value, idx: i.leaf === null ? null : BigInt(i.leaf) };
   };
   for (const name of ["transfer", "withdraw_seed", "withdraw"]) {
     const { domain, inputs, nf1, nf2 } = fixture[name];
-    const nullifiers = inputNullifiers(BigInt(domain), inputs.map(open));
+    // Both inputs, the dummy included, belong to the spend's owner set.
+    assert.equal(inputs[0].owner_root, inputs[1].owner_root, name);
+    const ownerRoot = BigInt(inputs[0].owner_root);
+    const nullifiers = inputNullifiers(BigInt(domain), ownerRoot, inputs.map(open));
     assert.deepEqual(nullifiers, [BigInt(nf1), BigInt(nf2)], name);
   }
-  const { sk, rho, value } = open(fixture.transfer.inputs[0]);
-  assert.equal(commitment(sk, rho, value), BigInt(fixture.cm_a));
+  const input = fixture.transfer.inputs[0];
+  const { nk, rho, value } = open(input);
+  assert.equal(commitment(ownerPk(BigInt(input.owner_root), nk), rho, value), BigInt(fixture.cm_a));
 });
 
 test("Tree matches the exported incremental-tree vectors", () => {
@@ -119,9 +129,21 @@ test("Tree matches the exported incremental-tree vectors", () => {
   assert.equal(tree.root(), BigInt(v.root_after_cm0_cm1), "root after cm0, cm1");
 });
 
+test("a depth-16 Tree matches the exported owner set and holds 2^16 leaves", () => {
+  const v = json("vectors/poseidon_bn254_vectors.json").owner_set;
+  const tree = new Tree(OWNER_DEPTH);
+  assert.equal(tree.root(), BigInt(v.root_empty), "empty root");
+  for (const address of v.addresses) tree.append(BigInt(address));
+  assert.equal(tree.root(), BigInt(v.root), "root");
+  assert.equal(tree.authPath(0n).siblings.length, OWNER_DEPTH);
+  for (let i = v.addresses.length; i < 2 ** OWNER_DEPTH; i++) tree.append(1n);
+  assert.throws(() => tree.append(1n), /tree full/);
+  for (const depth of [0, 21, 1.5]) assert.throws(() => new Tree(depth), RangeError, `${depth}`);
+});
+
 test("a value note's auth path reproduces the root", () => {
-  const [sk, rho] = newNote(seededRng(1n));
-  const note = commitment(sk, rho, 10n ** 18n);
+  const [nk, rho] = newNote(seededRng(1n));
+  const note = commitment(nk, rho, 10n ** 18n);
   const tree = new Tree();
   const { siblings, bits } = tree.authPath(tree.append(note));
   let node = note;
@@ -129,9 +151,9 @@ test("a value note's auth path reproduces the root", () => {
   assert.equal(node, tree.root());
 });
 
-test("a new note's spend key and rho are distinct field elements", () => {
-  // rho is less private than the spend key (the sender derives it in note delivery), so a draw
-  // repeating the spend key or another note's secret would hand the key to whoever learns rho.
+test("a new note's nullifier key and rho are distinct field elements", () => {
+  // rho is less private than nk (the sender derives it in note delivery), so a draw repeating
+  // nk or another note's secret would let whoever learns rho see when the note is spent.
   const rng = seededRng(2n);
   const secrets = Array.from({ length: 4 }, () => newNote(rng)).flat();
   assert.equal(new Set(secrets).size, secrets.length);
@@ -144,21 +166,39 @@ test("an authorizer key is one more than its draw below n - 1, so never zero", (
 });
 
 test("a withdrawal's zero outputs must each use their own position's sink", () => {
-  const inputs = [{ sk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(4n))];
-  const terms = { authorizer: 1n, publicAmount: 5n, recipient: 9n };
+  const inputs = [{ nk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(4n))];
+  const terms = { authorizer: 1n, owner: OWNER, publicAmount: 5n, recipient: 9n };
   const withdraw = (outputs: Output[]) => buildWitness(new Tree(), inputs, outputs, 0n, terms);
   assert.deepEqual(withdraw(sinkOutputs()).out_inner, ["1", "2"]);
   assert.throws(() => withdraw(sinkOutputs().reverse()), /must use its positional sink/);
 });
 
 test("an output inner past p is refused, so an alias of a sink inner cannot slip through", () => {
-  const inputs = [{ sk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(4n))];
+  const inputs = [{ nk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(4n))];
   const spend = (first: Output, second: Output) =>
-    buildWitness(new Tree(), inputs, [first, second], 0n, { authorizer: 1n });
+    buildWitness(new Tree(), inputs, [first, second], 0n, { authorizer: 1n, owner: OWNER });
   // The circuit reads P + 2 as sink inner 2 and refuses it for a positive output.
   assert.throws(() => spend([3n, 3n], [P + 2n, 2n]), /must be in \[0, p\)/);
   assert.throws(() => spend([P + 1n, 0n], [3n, 5n]), /must be in \[0, p\)/);
   assert.throws(() => spend([-1n, 3n], [3n, 2n]), /must be in \[0, p\)/);
   assert.throws(() => spend([P, 3n], [3n, 2n]), /must be in \[0, p\)/);
   assert.deepEqual(spend([P - 1n, 3n], [3n, 2n]).out_inner, [String(P - 1n), "3"]);
+});
+
+test("the owner is a nonzero address with a depth-16 path, and the witness carries it", () => {
+  const inputs = [{ nk: 1n, rho: 2n, value: 5n, idx: 0n }, dummyInput(seededRng(5n))];
+  const outputs: Output[] = [[3n, 5n], sinkOutputs()[1]];
+  const spend = (owner: typeof OWNER) =>
+    buildWitness(new Tree(), inputs, outputs, 0n, { authorizer: 1n, owner });
+  const w = spend(OWNER);
+  assert.equal(w.owner, String(OWNER.address));
+  assert.equal(w.owner_root, String(OWNER.root));
+  assert.deepEqual(w.owner_siblings, OWNER.path.siblings.map(String));
+  assert.deepEqual(w.owner_bits, OWNER.path.bits.map(String));
+  for (const address of [0n, 1n << 160n]) {
+    assert.throws(() => spend({ ...OWNER, address }), /owner must be a nonzero address/);
+  }
+  const { siblings, bits } = OWNER.path;
+  const short = { siblings: siblings.slice(1), bits: bits.slice(1) };
+  assert.throws(() => spend({ ...OWNER, path: short }), /an owner's path has 16 levels/);
 });

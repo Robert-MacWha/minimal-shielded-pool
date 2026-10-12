@@ -37,8 +37,8 @@ key is test-only. The vectors themselves are ignored by Git. The two reports,
 `native-report.json` and `policy-report.json`, are tracked, so a run changes
 them by design.
 
-The recorded run passes 77 native scenarios and two client-policy tests, using
-32 real Groth16 proofs. The highest measured settlement execution cost is
+The recorded run passes 86 native scenarios and two client-policy tests, using
+34 real Groth16 proofs. The highest measured settlement execution cost is
 1,435,539 gas (long carry plus withdrawal credit, with a first payment's
 notes). The conservative five-slot state test uses 489,600 state gas, below the
 pinned state limit. The reports contain each transaction hash and per-frame
@@ -98,16 +98,28 @@ maximum cost past the fee, and the pool refuses it before approval, again with
 state unchanged.
 
 Nineteen scenarios cover hybrid compression, and each leaves state unchanged.
-Twelve change one thing in a withdrawal: its `beta`, or one of the ten
-statement values in the settlement calldata. For `nf1` and `nf2` the nonce keys
-follow, and the authorizer case re-signs someone else's proof with an
-attacker's key, so these reach the proof check along with the output, amount,
-fee and recipient cases. The root and domain changes are refused earlier by the
-exact tuple and domain checks, and a `beta` outside the field by both the
-dispatcher and the verifier. Seven more prove an honest withdrawal against
-`alpha` over one value plus the field modulus, so the proof and `gamma` pass
+Twelve change one thing in a withdrawal: its `beta`, or one of the ten statement
+values in the settlement calldata. The owner signs each changed intent again.
+For `nf1` and `nf2` the nonce keys follow, and the authorizer case re-signs
+someone else's proof with an attacker's key, so these reach the proof check
+along with the output, amount, fee and recipient cases. The root and domain
+changes are refused earlier by the exact tuple and domain checks, and a `beta`
+outside the field by both the dispatcher and the verifier. Seven more prove an
+honest withdrawal against `alpha` over one value plus the field modulus, and the
+owner signs the aliased intent, so the proof, `gamma` and the owner check pass
 and only the dispatcher's range checks can refuse it. Deleting those checks
 makes exactly these seven fail.
+
+Nine scenarios cover the owner's signature. Seven change only the signatures
+of a valid withdrawal: no owner signature, the owner's signature twice, the
+owner's key signing another intent, the same intent for another pool, or the
+transaction hash, a key outside the owner set signing the right intent, and the
+owner signing first. One spends a note whose owner set holds a P-256 address,
+signed with P-256, which EIP-8141 validates but the pool refuses, so every
+spend has one shape. The pool refuses each in its `VERIFY` frame with state
+unchanged. The ninth proves a withdrawal again against a later root, under a
+new authorizer, beside the same dummy input and with the same owner leaf, and
+the owner's original signature authorizes it.
 
 Fourteen scenarios cover dispatcher checks that no other scenario reaches,
 each breaking one check in an otherwise valid spend. A spent key set replayed at

@@ -46,11 +46,11 @@ if [ -n "${PTAU:-}" ]; then
   echo "==> using external powers of tau: $PTAU"
   cp "$PTAU" "$BUILD/pot_final.ptau"
 else
-  echo "==> TESTBED phase 1: local powers of tau (power 14)"
-  "$SNARKJS" powersoftau new bn128 14 "$BUILD/pot14_0.ptau" -v >/dev/null
-  "$SNARKJS" powersoftau contribute "$BUILD/pot14_0.ptau" "$BUILD/pot14_1.ptau" \
+  echo "==> TESTBED phase 1: local powers of tau (power 15)"
+  "$SNARKJS" powersoftau new bn128 15 "$BUILD/pot15_0.ptau" -v >/dev/null
+  "$SNARKJS" powersoftau contribute "$BUILD/pot15_0.ptau" "$BUILD/pot15_1.ptau" \
     --name="testbed" -e="$(head -c 64 /dev/urandom | base64)" >/dev/null
-  "$SNARKJS" powersoftau prepare phase2 "$BUILD/pot14_1.ptau" "$BUILD/pot_final.ptau" -v >/dev/null
+  "$SNARKJS" powersoftau prepare phase2 "$BUILD/pot15_1.ptau" "$BUILD/pot_final.ptau" -v >/dev/null
 fi
 
 echo "==> phase 2: circuit-specific zkey"

@@ -1,10 +1,11 @@
 /**
  * A fixture's shield and spend entries as the pool's calldata, and the frame transaction that
  * carries a spend. A spend is VERIFY(0x…8272, recent-root tuple) -> VERIFY(pool, proof) ->
- * SENDER(pool, settle(Spend) || notes), plus at most one DEFAULT tail; the pool pays, its nonce
- * keys are the nullifiers, and the authorizer the proof selects signs the whole transaction.
- * Nothing here asks the node: src/deployment.ts checks a spend's recent root against it, and
- * src/send.ts sends the spend.
+ * SENDER(pool, settle(Spend) || notes), plus at most one DEFAULT tail; the pool pays, and its
+ * nonce keys are the nullifiers. It carries two signatures: the owner's over the spend's EIP-712
+ * intent, which the fixture records, then the signature of the authorizer the proof selects over
+ * the whole transaction, the owner's signature included. Nothing here asks the node:
+ * src/deployment.ts checks a spend's recent root against it, and src/send.ts sends the spend.
  */
 import {
   concat,
@@ -24,10 +25,13 @@ import {
   MODE,
   parsePrivateKey,
   rawTx,
+  recoverSigner,
   SCHEME,
+  SECP256K1_N,
   sigHash,
   signHash,
   type Frame,
+  type FrameSig,
   type FrameTx,
 } from "./frametx.ts";
 import * as gas from "./gas.ts";
@@ -122,6 +126,31 @@ export function parseSpendProof(entry: unknown): { proof: protocol.Proof; beta: 
 export function entryProofBytes(entry: unknown): Uint8Array {
   const { proof, beta } = parseSpendProof(entry);
   return protocol.proofBytes(proof, beta);
+}
+
+/**
+ * The owner's signature entry for a fixture spend entry from the pool at `pool` on chain
+ * `chainId`: its recorded signature over the spend's EIP-712 intent, refused unless it recovers
+ * to the entry's owner. The proof binds that owner, and the pool reads it from this entry.
+ */
+export function ownerSignature(entry: unknown, chainId: bigint, pool: bigint): FrameSig {
+  const owner = parseAddress(get(entry, "owner"), "the spend entry's owner");
+  const signature = fromHex(get(entry, "owner_signature"), "the spend entry's owner_signature", 65);
+  const msg = protocol.intentDigest(chainId, pool, parseSpend(entry, 0n));
+  // EIP-8141 takes v as 0 or 1 and only low s, so each signature has one encoding.
+  const lowS = toBigint(signature.subarray(33)) <= SECP256K1_N / 2n;
+  let signer: bigint | null = null;
+  try {
+    signer = lowS ? recoverSigner(msg, signature) : null;
+  } catch {
+    // v above 1, or r or s out of range: refused below, like a signature by another key
+  }
+  if (signer !== owner) {
+    throw new PoolError(
+      "the fixture's owner signature does not sign this spend's intent for this chain and pool",
+    );
+  }
+  return { scheme: SCHEME.SECP256K1, signer: owner, msg, signature };
 }
 
 /** The entry's authorizer key, refused unless it is the key of the authorizer the proof binds. */
@@ -266,11 +295,15 @@ export function spendNonceKeys(settle: Uint8Array): bigint[] {
   return a <= b ? [a, b] : [b, a];
 }
 
-/** Gives the transaction its one secp256k1 signature, in place; the hash elides its bytes. */
-export function signTransaction(tx: FrameTx, key: Uint8Array): FrameTx {
+/**
+ * Signs the transaction with `key` over its signature hash, in place, as its first signature,
+ * followed by `after`: the owner's signature for a spend, none for a call. The hash elides the
+ * first signature's bytes but covers the owner's, whose msg is an explicit digest.
+ */
+export function signTransaction(tx: FrameTx, key: Uint8Array, ...after: FrameSig[]): FrameTx {
   const unsigned = { scheme: SCHEME.SECP256K1, signer: addressOf(key), msg: new Uint8Array(0) };
-  tx.signatures = [{ ...unsigned, signature: new Uint8Array(0) }];
-  tx.signatures = [{ ...unsigned, signature: signHash(sigHash(tx), key) }];
+  tx.signatures = [{ ...unsigned, signature: new Uint8Array(0) }, ...after];
+  tx.signatures = [{ ...unsigned, signature: signHash(sigHash(tx), key) }, ...after];
   return tx;
 }
 

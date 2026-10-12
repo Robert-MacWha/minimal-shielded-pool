@@ -38,7 +38,8 @@ const get = (value: unknown, key: string): unknown => (isObject(value) ? value[k
  */
 export function referenceVerifierCalls(): [good: string, changed: string] {
   const transfer = get(parse(readFileSync(REFERENCE_FIXTURE, "utf8")), "transfer");
-  const stmt = protocol.statement(parseSpend(transfer, 0n));
+  const owner = parseAddress(get(transfer, "owner"), "the reference transfer's owner");
+  const stmt = protocol.statement({ ...parseSpend(transfer, 0n), owner });
   const alpha = protocol.compressionAlpha(stmt);
   const { proof, beta } = parseSpendProof(transfer);
   const gamma = protocol.fingerprint((alpha + beta) % protocol.P, stmt);
@@ -247,7 +248,8 @@ export async function recentRootReference(
         "would be rejected as FrameTxRecentRootNotCommitted. If another deposit changed the " +
         "tree, the notes are safe but this proof is not: prove again against a published root, " +
         "at the leaves the notes occupy, from the openings in the fixture entries' `inputs`, " +
-        "and keep this fixture: it holds the only copy of those secrets.",
+        "dummy included, so that the owner's signature still holds, and keep this fixture: it " +
+        "holds the only copy of those secrets.",
     );
   }
   return protocol.recentRootTuple(source, slot, root);

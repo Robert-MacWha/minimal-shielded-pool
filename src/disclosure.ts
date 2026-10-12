@@ -1,12 +1,13 @@
 /**
- * Disclosure receipts: which notes a spend consumed and created, without the spending key. A
- * nullifier is Poseidon3(4, nk, Poseidon2(cm, index)) with nk = Poseidon2(D, spend_key), so nk
- * and a note's position find the spend that published its nullifier, and the proof ties that
- * nullifier to exactly this note, yet only spend_key can spend. A receipt proves these links and
- * amounts, not who presents it or where the funds came from before the deposit. Notes paid to
- * one address share its spend key, so their nk covers every note of that address in the epoch.
- * Export cannot tell such a key from one a single note uses, so it refuses every nullifier key
- * unless --address-wide accepts that, and marks the notes that carry one.
+ * Disclosure receipts: which notes a spend consumed and created, without any key that finds or
+ * spends other notes in other epochs. A nullifier is Poseidon3(4, K, Poseidon2(cm, index)) with
+ * the domain key K = Poseidon2(D, nk), so K and a note's position find the spend that published
+ * its nullifier, and the proof ties that nullifier to exactly this note, yet only the owner set's
+ * device can authorize a spend. A receipt proves these links and amounts, not who presents it or
+ * where the funds came from before the deposit. Notes paid to one address share its nullifier key
+ * nk, so their K covers every note of that address in the epoch. Export cannot tell such a key
+ * from one a single note uses, so it refuses every domain key unless --address-wide accepts
+ * that, and marks the notes that carry one, under the receipt field nullifierKey.
  */
 import { existsSync } from "node:fs";
 
@@ -51,7 +52,7 @@ interface VerifiedNote {
 }
 
 type Position = { cm: bigint; epoch: bigint; index: bigint };
-type Opening = { sk: bigint; inner: bigint; value: bigint; places: Map<string, Position> };
+type Opening = { nk: bigint; inner: bigint; value: bigint; places: Map<string, Position> };
 const at = ({ cm, epoch, index }: Position) => `${cm},${epoch},${index}`;
 
 /**
@@ -60,7 +61,7 @@ const at = ({ cm, epoch, index }: Position) => `${cm},${epoch},${index}`;
  * EIP-8250 nonce manager, keccak256(pool, nullifier), when the fixture spends the note and the
  * logs do not show that spend (also when the note is still unspent on this chain) or, for a real
  * note, its creation. The RPC can match that slot to the nullifier once a spend publishes it, so
- * use a node you control. A receipt never holds spend_key or rho, and only notes the fixture
+ * use a node you control. A receipt never holds nk or rho, and only notes the fixture
  * spends get a nullifier key: a payment's output may be someone else's note, whose later spend
  * is theirs to disclose. A chain that cannot answer stops the export with its ChainError.
  */
@@ -104,7 +105,7 @@ export async function exportReceipt(
           .map((p) => ({ ...p, created: real ? leaves.get(at(p))?.created : undefined }))
       : [...leaves.values()].filter((leaf) => leaf.cm === cm);
     for (const { epoch, index, created } of places) {
-      const key = protocol.nullifierKey(protocol.domainScalar(chainId, pool, epoch), note.sk);
+      const key = protocol.domainKey(protocol.domainScalar(chainId, pool, epoch), note.nk);
       const nf = own ? protocol.nullifierFromKey(key, cm, index) : undefined;
       const spent = nf === undefined ? undefined : spentIn.get(nf);
       // ethrex leaves out of eth_getLogs every log of a frame transaction whose fourth frame
@@ -121,8 +122,8 @@ export async function exportReceipt(
       // account number, and a zero-value dummy can carry one in a fixture made by hand.
       if (spent !== undefined && !addressWide) {
         throw new ReceiptError(
-          `${label} may share its spend key with other notes, as notes paid to one address do: ` +
-            `its nullifier key would show when every note of that key in epoch ${epoch} is ` +
+          `${label} may share its nullifier key with other notes, as notes paid to one address ` +
+            `do: its domain key would show when every note of that key in epoch ${epoch} is ` +
             "spent. Pass --address-wide to disclose that",
         );
       }
@@ -150,11 +151,13 @@ function openings(fx: JsonObject) {
   const notes = new Map<bigint, Opening>();
   const open = (opening: unknown, place?: { epoch: bigint; index: bigint }) => {
     const o = asObject(opening, "an opening");
-    const sk = parseHex(o.spend_key, "an opening's spend_key");
+    const ownerRoot = parseHex(o.owner_root, "an opening's owner_root");
+    const nk = parseHex(o.nk, "an opening's nk");
     const rho = parseHex(o.rho, "an opening's rho");
     const value = parseDec(o.value, "an opening's value");
-    const cm = protocol.commitment(sk, rho, value);
-    const note = notes.get(cm) ?? { sk, inner: protocol.inner(sk, rho), value, places: new Map() };
+    const pk = protocol.ownerPk(ownerRoot, nk);
+    const cm = protocol.commitment(pk, rho, value);
+    const note = notes.get(cm) ?? { nk, inner: protocol.inner(pk, rho), value, places: new Map() };
     notes.set(cm, note);
     if (place) note.places.set(at({ cm, ...place }), { cm, ...place });
   };

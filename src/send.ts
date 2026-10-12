@@ -19,6 +19,7 @@ import {
   rawTx,
   sigHash,
   totalGasLimit,
+  type FrameSig,
   type FrameTx,
 } from "./frametx.ts";
 import * as gas from "./gas.ts";
@@ -52,6 +53,8 @@ export type Send =
       readonly settle: Uint8Array;
       readonly proof: Uint8Array;
       readonly recentRoot: Uint8Array;
+      /** The owner's signature entry over the spend's intent (spend.ts ownerSignature). */
+      readonly owner: FrameSig;
       readonly action?: Action | null;
       readonly omitTail?: boolean;
       readonly allowFailedClaim?: boolean;
@@ -272,7 +275,7 @@ export async function buildAndSend(
       maxBlobFee: 0n,
       blobHashes: [],
     };
-    checkTxResourceLimits(signTransaction(tx, key));
+    checkTxResourceLimits(signTransaction(tx, key, ...(spend ? [spend.owner] : [])));
     return tx;
   };
   let tx = build();

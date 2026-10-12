@@ -30,6 +30,7 @@ const EXPECTED_PROFILE = {
   verify_frame_gas: gas.VERIFY_FRAME_GAS,
   verify_frame_state_gas: gas.VERIFY_FRAME_STATE_GAS,
   signature_gas: gas.SIGNATURE_GAS,
+  spend_signatures: gas.SPEND_SIGNATURES,
   settle_frame_gas: gas.SETTLE_FRAME_GAS,
   settle_frame_state_gas: gas.SETTLE_FRAME_STATE_GAS,
 };
@@ -294,7 +295,8 @@ export function checkActivation(
       throw new CheckError(`${key} does not match the immutable dispatcher profile`);
     }
   }
-  // The loop above pinned the three frames that make up this budget to the wallet's constants.
+  // The loop above pinned the two frames and the signatures that make up this budget to the
+  // wallet's constants.
   if (!matches(read("required_verify_budget"), gas.REQUIRED_VERIFY_BUDGET)) {
     throw new CheckError("required verify budget is inconsistent");
   }

@@ -1,10 +1,10 @@
 /**
  * The pool's protocol: note hashes, the nullifier and its domain, the proof statement and its
- * hybrid compression, EIP-8272 recent-root keys, and the pool's ABI and events. The circuit,
- * the dispatcher and the logic contract compute the same values, so every encoding here is
- * consensus-critical. Hashes reduce any bigint modulo P, as the circuit does; encoders check
- * only ABI ranges, since wallet policy belongs to callers and the native generator encodes
- * deliberately invalid words.
+ * hybrid compression, the owner's EIP-712 spend intent, EIP-8272 recent-root keys, and the
+ * pool's ABI and events. The circuit, the dispatcher and the logic contract compute the same
+ * values, so every encoding here is consensus-critical. Hashes reduce any bigint modulo P, as
+ * the circuit does; encoders check only ABI ranges, since wallet policy belongs to callers and
+ * the native generator encodes deliberately invalid words.
  */
 import {
   addressFromText,
@@ -37,6 +37,8 @@ const fits = (value: bigint, bits: bigint) => value >= 0n && value < 1n << bits;
 
 export const DEPTH = 20;
 export const TREE_CAPACITY = 1n << BigInt(DEPTH);
+/** An owner set is a depth-16 tree of addresses, so it holds up to 2^16 one-time signers. */
+export const OWNER_DEPTH = 16;
 /** Values are below 2^128, so the circuit's conservation sum cannot wrap the field. */
 export const MAX_VALUE = 1n << 128n;
 /** The root of the empty depth-20 tree, which the dispatcher stores at deployment. */
@@ -55,31 +57,36 @@ export function tagged(tag: bigint, a: bigint, b: bigint): bigint {
   return poseidon([tag, a, b]);
 }
 
-export function ownerPk(spendKey: bigint): bigint {
-  return tagged(TAG_PK, spendKey, 0n);
+/**
+ * A note's owner key: the root of the owner set whose addresses can authorize its spend, and
+ * the nullifier key nk, which the wallet holds to prove its notes and see when they are
+ * spent. Neither spends.
+ */
+export function ownerPk(ownerRoot: bigint, nk: bigint): bigint {
+  return tagged(TAG_PK, ownerRoot, nk);
 }
 
-/** What a recipient reveals to be paid: it hides ownerPk and rho. */
-export function inner(spendKey: bigint, rho: bigint): bigint {
-  return p2(ownerPk(spendKey), rho);
+/** What a recipient reveals to be paid: it hides the owner key pk and rho. */
+export function inner(pk: bigint, rho: bigint): bigint {
+  return p2(pk, rho);
 }
 
 /** A note's commitment and tree leaf, as shield computes it. */
-export function commitment(spendKey: bigint, rho: bigint, value: bigint): bigint {
-  return tagged(TAG_LEAF, inner(spendKey, rho), value);
+export function commitment(pk: bigint, rho: bigint, value: bigint): bigint {
+  return tagged(TAG_LEAF, inner(pk, rho), value);
 }
 
 /**
- * The nullifier key nk = p2(domain, spendKey). With a note's position, nk finds when the note is
- * spent but cannot spend it, so disclosure receipts publish nk and never the spend key.
+ * The domain key p2(domain, nk). With a note's position, it finds when the note is spent in that
+ * epoch's domain, so disclosure receipts publish it and never nk.
  */
-export function nullifierKey(domain: bigint, spendKey: bigint): bigint {
-  return p2(domain, spendKey);
+export function domainKey(domain: bigint, nk: bigint): bigint {
+  return p2(domain, nk);
 }
 
 /**
- * A note occurrence's nullifier from its key. The leaf index is hashed in, so two deposits of
- * one commitment are spent independently.
+ * A note occurrence's nullifier from its domain key. The leaf index is hashed in, so two
+ * deposits of one commitment are spent independently.
  */
 export function nullifierFromKey(key: bigint, cm: bigint, index: bigint): bigint {
   if (!fits(index, BigInt(DEPTH))) throw new InputError("note index outside the depth-20 tree");
@@ -87,8 +94,8 @@ export function nullifierFromKey(key: bigint, cm: bigint, index: bigint): bigint
 }
 
 /** A note occurrence's nullifier in the domain of the epoch it was appended to. */
-export function nullifier(domain: bigint, spendKey: bigint, cm: bigint, index: bigint): bigint {
-  return nullifierFromKey(nullifierKey(domain, spendKey), cm, index);
+export function nullifier(domain: bigint, nk: bigint, cm: bigint, index: bigint): bigint {
+  return nullifierFromKey(domainKey(domain, nk), cm, index);
 }
 
 export const DOMAIN_TAG = keccak(utf8("minimal-shielded-pool:occurrence-domain:v1"));
@@ -107,9 +114,12 @@ export function domainScalar(chainId: bigint, pool: bigint | string, epoch = 0n)
 
 // ---- statement and hybrid compression ----
 
-/** One spend input as the witness takes it; idx is null for a zero-value dummy. */
+/**
+ * One spend input as the witness takes it: its nullifier key, rho, value and leaf, idx being null
+ * for a zero-value dummy. Both inputs belong to the spend's owner set.
+ */
 export interface SpendInput {
-  sk: bigint;
+  nk: bigint;
   rho: bigint;
   value: bigint;
   idx: bigint | null;
@@ -129,41 +139,101 @@ export function sinkCommitments(): bigint[] {
   return outputCommitments(sinkOutputs());
 }
 
-/** The inputs' nullifiers in order; a dummy is never in the tree and uses index 0. */
-export function inputNullifiers(domain: bigint, inputs: readonly SpendInput[]): bigint[] {
-  return inputs.map((i) => nullifier(domain, i.sk, commitment(i.sk, i.rho, i.value), i.idx ?? 0n));
+/**
+ * The nullifiers of inputs in the owner set with root ownerRoot, in order; a dummy is never in
+ * the tree and uses index 0.
+ */
+export function inputNullifiers(
+  domain: bigint,
+  ownerRoot: bigint,
+  inputs: readonly SpendInput[],
+): bigint[] {
+  return inputs.map((i) => {
+    const cm = commitment(ownerPk(ownerRoot, i.nk), i.rho, i.value);
+    return nullifier(domain, i.nk, cm, i.idx ?? 0n);
+  });
 }
 
 export function outputCommitments(outputs: readonly Output[]): bigint[] {
   return outputs.map(([out, value]) => tagged(TAG_LEAF, out, value));
 }
 
-/** The ten values a proof binds, in the order the circuit and the pool hash them. */
-export function statement(s: Omit<Spend, "rootSlot" | "epoch">): bigint[] {
+/**
+ * What a proof binds: the settlement's values but its root slot and epoch, then the owner, the
+ * address the pool reads from the owner's signature entry.
+ */
+export type Statement = Omit<Spend, "rootSlot" | "epoch"> & { owner: bigint };
+
+export const STATEMENT_LENGTH = 11;
+
+/** The eleven values a proof binds, in the order the circuit and the pool hash them. */
+export function statement(s: Statement): bigint[] {
   const hashes = [s.nf1, s.nf2, s.outCm1, s.outCm2, s.root, s.domain];
-  return [...hashes, s.publicAmount, s.fee, s.recipient, s.authorizer];
+  return [...hashes, s.publicAmount, s.fee, s.recipient, s.authorizer, s.owner];
 }
 
 /**
- * The contract-side hash: keccak256 of the ten values as words, mod P. The pool refuses a word
- * at or above P, since x + P would give another alpha for the same statement, and so does this.
+ * The contract-side hash: keccak256 of the eleven values as words, mod P. The pool refuses a
+ * word at or above P, since x + P would give another alpha for the same statement, and so does
+ * this.
  */
 export function compressionAlpha(stmt: readonly bigint[]): bigint {
-  if (stmt.length !== 10 || stmt.some((x) => x < 0n || x >= P)) {
-    throw new RangeError("a statement is ten field elements");
+  if (stmt.length !== STATEMENT_LENGTH || stmt.some((x) => x < 0n || x >= P)) {
+    throw new RangeError("a statement is eleven field elements");
   }
   return toBigint(keccak(concat(...stmt.map(word)))) % P;
 }
 
-/** The circuit-side hash: Poseidon of the ten values. */
+/** The circuit-side hash: Poseidon of the eleven values. */
 export function compressionBeta(stmt: readonly bigint[]): bigint {
-  if (stmt.length !== 10) throw new RangeError("a statement is ten values");
+  if (stmt.length !== STATEMENT_LENGTH) throw new RangeError("a statement is eleven values");
   return poseidon(stmt);
 }
 
 /** x0 + x1 * sigma + ... + xn * sigma^n mod P. The pool's gamma uses sigma = alpha + beta. */
 export function fingerprint(sigma: bigint, stmt: readonly bigint[]): bigint {
   return stmt.reduceRight((acc, x) => mod(acc * sigma + x, P), 0n);
+}
+
+// ---- the owner's spend intent (EIP-712) ----
+
+/**
+ * The owner signs the spend's EIP-712 intent, which an Ethereum wallet or hardware device can
+ * sign as typed data: its nullifiers and outputs, which name the notes it spends and creates,
+ * and its withdrawal and fee. It omits the root, the epoch and the authorizer, so a wallet can
+ * prove a spend again against a newer root, or under a new authorizer, without a new signature.
+ * The dispatcher computes the same digest and requires it as the owner signature's msg.
+ */
+export const INTENT_DOMAIN_TYPE =
+  "EIP712Domain(string name,uint256 chainId,address verifyingContract)";
+export const INTENT_DOMAIN_NAME = "Minimal Shielded Pool";
+export const INTENT_TYPE =
+  "Spend(bytes32 nullifier1,bytes32 nullifier2,bytes32 output1,bytes32 output2," +
+  "uint256 amount,address recipient,uint256 fee)";
+
+/** The values of a spend that the owner's intent names. */
+export type Intent = Pick<
+  Statement,
+  "nf1" | "nf2" | "outCm1" | "outCm2" | "publicAmount" | "recipient" | "fee"
+>;
+
+/** EIP-712's domain separator for the pool at `pool` on chain `chainId`. */
+export function intentDomainSeparator(chainId: bigint, pool: bigint): Uint8Array {
+  const [type, name] = [INTENT_DOMAIN_TYPE, INTENT_DOMAIN_NAME].map((text) => keccak(utf8(text)));
+  const fields = [abiWord(chainId, "uint256", "chain id"), abiWord(pool, "address", "pool")];
+  return keccak(concat(type, name, ...fields));
+}
+
+/**
+ * The digest an owner signs to authorize `intent`: keccak256(0x1901 || domain || struct). Like
+ * the dispatcher, it hashes each field as the 32-byte word the settlement carries, so for a
+ * recipient that is an address, the digest is EIP-712's. Callers check that it is one.
+ */
+export function intentDigest(chainId: bigint, pool: bigint, intent: Intent): Uint8Array {
+  const { nf1, nf2, outCm1, outCm2, publicAmount, recipient, fee } = intent;
+  const fields = [nf1, nf2, outCm1, outCm2, publicAmount, recipient, fee].map(word);
+  const struct = keccak(concat(keccak(utf8(INTENT_TYPE)), ...fields));
+  return keccak(concat(Uint8Array.of(0x19, 0x01), intentDomainSeparator(chainId, pool), struct));
 }
 
 // ---- EIP-8250 keyed nonces ----

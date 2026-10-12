@@ -32,7 +32,16 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
 
-import { compareBigint, concat, fromHex, hex32, hexPadded, keccak, toHex } from "../src/bytes.ts";
+import {
+  compareBigint,
+  concat,
+  fromHex,
+  hex32,
+  hexPadded,
+  keccak,
+  toBigint,
+  toHex,
+} from "../src/bytes.ts";
 import { NotesError } from "../src/errors.ts";
 import { POOL_PROFILE, SHIELD_NOTE_BYTES, SPEND_NOTES_BYTES } from "../src/gas.ts";
 import { parse, stringify } from "../src/json.ts";
@@ -43,8 +52,10 @@ import {
   NOTES,
   NOTE_SPENT,
   TREE_CAPACITY,
+  commitment,
   domainScalar,
   nullifier,
+  ownerPk,
 } from "../src/protocol.ts";
 import { seededRng } from "../src/random.ts";
 import { RpcChain, TOO_LARGE } from "../src/rpc.ts";
@@ -72,13 +83,19 @@ const RNG = seededRng(20261008n);
 const dummy = () => n.dummyNote(RNG);
 const utf8 = (text: string) => new TextEncoder().encode(text);
 const seedOf = (name: string) => keccak(utf8(name));
-const [ALICE, BOB, CAROL] = ["alice", "bob", "carol"].map((name) => new n.WalletKeys(seedOf(name)));
+/** A wallet's owner set root; scanning needs only the owner key it makes with nk. */
+const ownerRootOf = (name: string) => toBigint(keccak(utf8(`${name}'s owner set`))) % P;
+const keysOf = (name: string, account = 0n) =>
+  new n.WalletKeys(seedOf(name), ownerRootOf(name), account);
+const [ALICE, BOB, CAROL] = ["alice", "bob", "carol"].map((name) => keysOf(name));
 
 const CLI = fileURLToPath(new URL("../src/cli/notes.ts", import.meta.url));
 const TMP = mkdtempSync(join(tmpdir(), "notes-test-"));
 after(() => rmSync(TMP, { recursive: true, force: true }));
 const SEED = join(TMP, "seed");
 writeFileSync(SEED, toHex(seedOf("alice")), { mode: 0o600 });
+/** Alice's wallet on the command line: her seed file and her owner set's root. */
+const WALLET = ["--seed-file", SEED, "--owner-root", hex32(ALICE.ownerRoot)];
 
 function raises(fn: () => unknown, expected: string): void {
   assert.throws(fn, (error: unknown) => {
@@ -125,12 +142,12 @@ const SHIELD = { sizes: SHIELD_NOTE_BYTES };
 /** A note on `channel` for value, and the commitment it opens to. */
 function paid(ownerPk: bigint, channel: n.Outgoing, value: bigint) {
   const { note, rho, ciphertext } = n.reserve(channel, value);
-  return { note, cm: n.outputCommitment(ownerPk, rho, value), ciphertext };
+  return { note, cm: commitment(ownerPk, rho, value), ciphertext };
 }
 type Paid = ReturnType<typeof paid>;
 
 function nullifierOf(keys: n.WalletKeys, cm: bigint, index: bigint, epoch = 0n): bigint {
-  return nullifier(domainScalar(CHAIN, POOL, epoch), keys.spendKey, cm, index);
+  return nullifier(domainScalar(CHAIN, POOL, epoch), keys.nk, cm, index);
 }
 
 /** Bob shields, pays Alice four ways and withdraws; Carol pays Alice, then Bob. */
@@ -221,22 +238,33 @@ test("primitives: a note opens only with its secret and index, and sizes are enf
   raises(() => n.shieldNotes(concat(note, note)), "one 48-byte note");
 });
 
-test("keys and addresses: derived from the seed and account, and checked on decode", () => {
-  const again = new n.WalletKeys(seedOf("alice"));
+test("keys and addresses: derived from the seed, owner set and account, and checked on decode", () => {
+  const again = keysOf("alice");
   assert.equal(again.address().hex(), ALICE.address().hex());
-  assert.equal(again.spendKey, ALICE.spendKey);
-  const second = new n.WalletKeys(seedOf("alice"), 1n);
+  assert.equal(again.nk, ALICE.nk);
+  assert.equal(ALICE.ownerPk, ownerPk(ALICE.ownerRoot, ALICE.nk));
+  const second = keysOf("alice", 1n);
   assert.notEqual(second.address().hex(), ALICE.address().hex());
-  assert.notEqual(second.spendKey, ALICE.spendKey);
+  assert.notEqual(second.nk, ALICE.nk);
+  // Another owner set makes another owner key, with the same secrets.
+  const moved = new n.WalletKeys(seedOf("alice"), ownerRootOf("bob"));
+  assert.notEqual(moved.ownerPk, ALICE.ownerPk);
+  assert.equal(moved.nk, ALICE.nk);
+  assert.deepEqual(moved.selfSecret, ALICE.selfSecret);
   assert.equal(n.Address.decode(ALICE.address().hex()).hex(), ALICE.address().hex());
   assert.equal(ALICE.address().encode().length, 1217);
   assert.equal(n.ADDRESS_BYTES, 1217);
-  raises(() => new n.WalletKeys(new Uint8Array(31).fill(1)), "at least 32 bytes");
+  raises(() => new n.WalletKeys(new Uint8Array(31).fill(1), 1n), "at least 32 bytes");
+  for (const root of [0n, P]) {
+    raises(() => new n.WalletKeys(seedOf("alice"), root), "nonzero field element");
+  }
   const good = ALICE.address().encode();
   const refused = (expected: string, ...parts: Uint8Array[]) =>
     raises(() => n.Address.decode(concat(...parts)), expected);
-  refused("starting with version 1", Uint8Array.of(2), good.subarray(1));
-  refused("starting with version 1", good.subarray(0, -1));
+  // A version 1 address names a spend key, so no owner set could spend a payment to it.
+  refused("predates owner sets", Uint8Array.of(1), good.subarray(1));
+  refused("starting with version 2", Uint8Array.of(3), good.subarray(1));
+  refused("starting with version 2", good.subarray(0, -1));
   const [version, rest] = [good.subarray(0, 1), good.subarray(33)];
   refused("nonzero field element", version, new Uint8Array(32), rest);
   refused("nonzero field element", version, fromHex(hex32(P), "P"), rest);
@@ -524,7 +552,7 @@ test("a payment at the far edge of a channel's window derives only the tags it n
   const chain = new Chain();
   const pay = (index: bigint) => {
     const { note, rho } = n.sealNote(secret, index, ETH);
-    chain.add(n.shieldNotes(note), [n.outputCommitment(ALICE.ownerPk, rho, ETH)], [], SHIELD);
+    chain.add(n.shieldNotes(note), [commitment(ALICE.ownerPk, rho, ETH)], [], SHIELD);
   };
   for (let j = 1; j <= K; j++) pay(BigInt(j * L - 1));
   pay(BigInt(K * L));
@@ -666,7 +694,7 @@ test("hidden calls: calls left out of eth_getLogs are rebuilt from receipts or c
         const node = await serve(c.chain, { block }, hiding);
         try {
           const config = writeConfig(dir, node.url);
-          const args = ["scan", "--config", config, "--state", state, "--seed-file", SEED];
+          const args = ["scan", "--config", config, "--state", state, ...WALLET];
           await cli(args, typeof c.outcome === "string" ? c.outcome : undefined);
           const asked = node.requests.some((call) => call.method === "eth_getStorageAt");
           assert.ok(!asked, "asked about a nullifier");
@@ -1028,7 +1056,7 @@ test("CLI: scan and direct-secret keep owner-only state and hand out each number
   const node = await serve(chain, finalized);
   const dir = mkdtempSync(join(TMP, "cli-"));
   try {
-    const seedFile = ["--seed-file", SEED];
+    const seedFile = WALLET;
     // A seed file other local users can read, as a group or as anyone, is refused.
     for (const mode of [0o644, 0o640]) {
       chmodSync(SEED, mode);
@@ -1036,7 +1064,14 @@ test("CLI: scan and direct-secret keep owner-only state and hand out each number
     }
     chmodSync(SEED, 0o600);
     assert.equal((await cli(["address", ...seedFile])).trim(), ALICE.address().hex());
-    const secondAccount = new n.WalletKeys(seedOf("alice"), 1n).address().hex();
+    // The owner set's root is public but required: it is half of the address's owner key.
+    const seedOnly = ["address", "--seed-file", SEED];
+    await cli(seedOnly, "--owner-root is required");
+    await cli([...seedOnly, "--owner-root", "0x1234"], "--owner-root is 32 bytes");
+    const bobs = ["--owner-root", hex32(BOB.ownerRoot)];
+    const moved = new n.WalletKeys(seedOf("alice"), BOB.ownerRoot).address().hex();
+    assert.equal((await cli([...seedOnly, ...bobs])).trim(), moved);
+    const secondAccount = keysOf("alice", 1n).address().hex();
     assert.equal((await cli(["address", "--account", "1", ...seedFile])).trim(), secondAccount);
     await cli(["address", "--account", String(1n << 256n), ...seedFile], "below 2^256");
 
@@ -1122,7 +1157,7 @@ test("CLI: a state named through a symbolic link is locked and saved as the file
   try {
     const [state, link] = [join(dir, "state.json"), join(dir, "link.json")];
     const config = writeConfig(dir, node.url);
-    const args = (path: string) => ["--config", config, "--state", path, "--seed-file", SEED];
+    const args = (path: string) => ["--config", config, "--state", path, ...WALLET];
     await cli(["scan", ...args(state)]);
     symlinkSync(state, link);
     assert.equal(record(await cli(["direct-secret", ...args(link)])).number, 4);
@@ -1152,7 +1187,7 @@ test("CLI: a node's oversized reply is refused before parsing, and the state loc
   try {
     const state = join(dir, "state.json");
     const config = writeConfig(dir, node.url);
-    const scan = ["scan", "--config", config, "--state", state, "--seed-file", SEED];
+    const scan = ["scan", "--config", config, "--state", state, ...WALLET];
     await cli(scan, "the reply is larger than 16 MiB; pass a smaller --chunk");
     assert.equal(existsSync(`${state}.lock.d`), false);
   } finally {
@@ -1195,7 +1230,7 @@ test("CLI: an earlier version's state is rescanned before direct-secret issues a
     };
     writeFileSync(state, stringify(old, 1), { mode: 0o600 });
     const saved = readFileSync(state, "utf8");
-    const args = ["--config", writeConfig(dir, node.url), "--state", state, "--seed-file", SEED];
+    const args = ["--config", writeConfig(dir, node.url), "--state", state, ...WALLET];
     const reason =
       "since it shows epoch 0 closed with 1048575 of 1048576 leaves, and the earlier version " +
       "that saved it could miss a payment in an epoch's last leaves";
@@ -1229,8 +1264,9 @@ test("smoke fixture: the committed fixture's notes open for its wallets", () => 
   const path = new URL("fixtures/smoke_fixture.json", import.meta.url);
   const fixture = parse(readFileSync(path, "utf8")) as Record<string, any>;
   const [alice, bob] = ["alice", "bob"].map((name) => {
-    const keys = new n.WalletKeys(fromHex(fixture.wallets[name].seed, "seed"));
-    assert.equal(fixture.wallets[name].address, keys.address().hex());
+    const wallet = fixture.wallets[name];
+    const keys = new n.WalletKeys(fromHex(wallet.seed, "seed"), BigInt(wallet.owner_root));
+    assert.equal(wallet.address, keys.address().hex());
     return keys;
   });
   const { transfer: t, withdraw_seed: ws, withdraw: wd } = fixture;

@@ -2,9 +2,10 @@
  * The fixture generators refuse, before proving, anything that would put live notes at risk: the
  * public seed off the test chain, a recipient that strands its credit, and overwriting a fixture
  * that may hold the only secrets of unspent notes. A refusal never echoes a key pasted as an
- * argument. Secrets are owner-only, --random draws fresh wallets, live fixtures default to the
- * ignored artifacts/, a state lock admits one run at a time and passes to a single run once its
- * holder dies, and a real nonce-race run records what recovery and the shield check need.
+ * argument. Secrets are owner-only, --random draws fresh wallets and owner sets, live fixtures
+ * default to the ignored artifacts/, a state lock admits one run at a time and passes to a single
+ * run once its holder dies, and a real nonce-race run records what recovery, the shield check
+ * and the pool CLI need.
  *
  * Run: node --test test/generators.test.ts (about 2 s, most of it the run that proves two
  * transfers).
@@ -50,8 +51,9 @@ import {
 } from "../src/fixtures.ts";
 import { parse } from "../src/json.ts";
 import { NONCE_RACE_OUTPUT } from "../src/nonce-race.ts";
-import { commitment, domainScalar } from "../src/protocol.ts";
+import { commitment, domainScalar, ownerPk } from "../src/protocol.ts";
 import { generateSmoke } from "../src/smoke.ts";
+import { ownerSignature } from "../src/spend.ts";
 import { Tree, type Witness } from "../src/wallet.ts";
 import { rpcServer, runCli } from "./helpers.ts";
 
@@ -353,7 +355,7 @@ test("live fixtures default to the ignored artifacts directory", () => {
   }
 });
 
-test("--random draws fresh wallets, and the withdrawals pay --recipient", async () => {
+test("--random draws fresh wallets and owner sets, and the withdrawals pay --recipient", async () => {
   const payee = "0x" + "cd".repeat(20);
   const output = join(TMP, "smoke.json");
   const options = {
@@ -383,7 +385,10 @@ test("--random draws fresh wallets, and the withdrawals pay --recipient", async 
   }
   // Alice spends in the transfer and Bob in the withdrawal.
   for (const tag of ["transfer", "withdraw"]) {
-    assert.notEqual(first.get(tag)?.in_spend_key[0], second.get(tag)?.in_spend_key[0], tag);
+    const [a, b] = [first.get(tag), second.get(tag)];
+    assert.notEqual(a?.in_nk[0], b?.in_nk[0], tag);
+    assert.notEqual(a?.owner_root, b?.owner_root, tag);
+    assert.notEqual(a?.owner, b?.owner, tag);
   }
 });
 
@@ -400,10 +405,13 @@ test("a nonce-race fixture binds --epoch and records what recovery and the shiel
   assert.equal(BigInt(fixture.domain), domainScalar(31337n, POOL_ADDRESS, 3n));
   for (const name of ["transfer", "transfer_c"]) {
     const entry = fixture[name];
-    const cms = entry.output_openings.map((o: Record<string, string>) =>
-      commitment(BigInt(o.spend_key), BigInt(o.rho), BigInt(o.value)),
-    );
+    const cms = entry.output_openings.map((o: Record<string, string>) => {
+      const pk = ownerPk(BigInt(o.owner_root), BigInt(o.nk));
+      return commitment(pk, BigInt(o.rho), BigInt(o.value));
+    });
     assert.deepEqual(cms, [BigInt(entry.out_cm1), BigInt(entry.out_cm2)], name);
+    // The pool CLI sends the owner's signature, which signs the spend for this chain and pool.
+    assert.equal(ownerSignature(entry, 31337n, BigInt(POOL_ADDRESS)).signer, BigInt(entry.owner));
   }
   const tree = new Tree();
   for (const shield of fixture.shields) {

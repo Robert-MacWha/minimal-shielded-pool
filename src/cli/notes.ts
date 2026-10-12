@@ -3,19 +3,20 @@
  * the wallet seed, keeps the wallet's state file under a lock, and saves each direct number it
  * issues before returning its secret.
  *
- *   node src/cli/notes.ts address [--account N] [--seed-file PATH]
- *   node src/cli/notes.ts scan --config CONFIG --state PATH [--rpc URL] [--chunk N] [--account N]
- *                              [--seed-file PATH]
- *   node src/cli/notes.ts direct-secret --config CONFIG --state PATH [--number N] [--account N]
- *                                       [--seed-file PATH]
+ *   node src/cli/notes.ts address --owner-root ROOT [--account N] [--seed-file PATH]
+ *   node src/cli/notes.ts scan --owner-root ROOT --config CONFIG --state PATH [--rpc URL]
+ *                              [--chunk N] [--account N] [--seed-file PATH]
+ *   node src/cli/notes.ts direct-secret --owner-root ROOT --config CONFIG --state PATH
+ *                                       [--number N] [--account N] [--seed-file PATH]
  *
- * direct-secret issues the next number and records it in the state; --number shows one already
- * issued again. Without --seed-file the seed is typed at a hidden prompt or read from standard
- * input, never taken from the command line, which other local users can read.
+ * ROOT is the root of the owner set whose device authorizes the address's spends, which is
+ * public. direct-secret issues the next number and records it in the state; --number shows one
+ * already issued again. Without --seed-file the seed is typed at a hidden prompt or read from
+ * standard input, never taken from the command line, which other local users can read.
  */
 import { existsSync, realpathSync } from "node:fs";
 
-import { hex32, parseConfigAddress, parseDec, toHex } from "../bytes.ts";
+import { hex32, parseConfigAddress, parseDec, toBigint, toHex } from "../bytes.ts";
 import { NotesError } from "../errors.ts";
 import {
   FileChangedError,
@@ -39,6 +40,7 @@ const SPEC = {
   positionals: [{ name: "command", choices: ["address", "direct-secret", "scan"] }],
   options: {
     "--seed-file": { kind: "string", help: "owner-only file holding the wallet seed in hex" },
+    "--owner-root": { kind: "string", help: "the owner set's root, as 32 bytes of hex" },
     "--account": { kind: "decimal", help: "address number derived from the seed" },
     "--number": { kind: "decimal", help: "direct-secret: show a number already handed out again" },
     "--config": { kind: "string", help: "scan, direct-secret: config naming the chain and pool" },
@@ -55,10 +57,14 @@ export async function main(argv: readonly string[]): Promise<void> {
   const file = options["--seed-file"];
   const seed = file ? readPrivate(file) : await readSecretLine("wallet seed (hex): ");
   const seedBytes = pastedHex(seed.trim(), "a seed");
+  const root = options["--owner-root"];
+  if (root === undefined) throw new NotesError("--owner-root is required");
+  const ownerRoot = pastedHex(root, "--owner-root");
+  if (ownerRoot.length !== 32) throw new NotesError("--owner-root is 32 bytes");
   // WalletKeys hashes the account as one 32-byte word and throws a RangeError past it.
   const account = options["--account"] ?? 0n;
   if (account >= 1n << 256n) throw new NotesError("--account must be below 2^256");
-  const keys = new WalletKeys(seedBytes, account);
+  const keys = new WalletKeys(seedBytes, toBigint(ownerRoot), account);
   const chunk = options["--chunk"];
   const command = {
     keys,
