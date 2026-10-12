@@ -21,7 +21,7 @@ import {
 } from "../src/frametx.ts";
 import { OwnerSet, SoftwareOwner } from "../src/owner.ts";
 import * as protocol from "../src/protocol.ts";
-import { Tree } from "../src/wallet.ts";
+import { OwnerTree } from "../src/wallet.ts";
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 const SEED = keccak(utf8("owner test seed"));
@@ -29,7 +29,7 @@ const SEED = keccak(utf8("owner test seed"));
 test("an owner set's root and paths follow from its addresses in leaf order", () => {
   const addresses = [5n, 7n, (1n << 160n) - 1n];
   const set = new OwnerSet(addresses);
-  const tree = new Tree(protocol.OWNER_DEPTH);
+  const tree = new OwnerTree(protocol.OWNER_DEPTH);
   for (const address of addresses) tree.append(address);
   assert.equal(set.root, tree.root());
   assert.notEqual(new OwnerSet([7n, 5n, (1n << 160n) - 1n]).root, set.root);

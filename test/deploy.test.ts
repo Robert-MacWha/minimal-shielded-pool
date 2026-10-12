@@ -34,7 +34,6 @@ const clean: Env = Object.fromEntries(
   Object.entries(process.env).filter(([k]) => !/^(foundry_|dapp_)/.test(k.toLowerCase())),
 );
 
-const T3 = "0x00000000000000000000000000000000000000A3";
 const T4 = "0x00000000000000000000000000000000000000A4";
 const LIB = "0x00000000000000000000000000000000000000b1";
 const LIB_CODE = "0x73" + LIB.slice(2) + "3014";
@@ -42,15 +41,14 @@ const LOGIC_CODE = "0x60016002";
 const POOL_CODE = "0x6005";
 const CHECKS = ["verify_library_runtime", "verify_logic_runtime", "verify_created_runtime"];
 
-// cast code prints $CODE, cast call --create prints $CREATED, the two Poseidon getters print
-// $GOT_T3 and $GOT_T4; each returns its *_STATUS, and any other call fails.
+// cast code prints $CODE, cast call --create prints $CREATED, the Poseidon getter prints
+// $GOT_T4; each returns its *_STATUS, and any other call fails.
 const FAKE_CAST = `
 cast() {
   local out status
   case "$1 $2 $3" in
     code*) out=$CODE status=\${CODE_STATUS:-0} ;;
     "call --rpc-url"*) out=$CREATED status=\${CREATED_STATUS:-0} ;;
-    *POSEIDON_T3*) out=$GOT_T3 status=\${T3_STATUS:-0} ;;
     *POSEIDON_T4*) out=$GOT_T4 status=\${T4_STATUS:-0} ;;
     *) return 2 ;;
   esac
@@ -58,7 +56,7 @@ cast() {
   return "$status"
 }
 `;
-const FAKE_VARIABLES = /^(CODE|CREATED|GOT_T3|GOT_T4)(_STATUS)?$|^(T3|T4)_STATUS$|^BN$/;
+const FAKE_VARIABLES = /^(CODE|CREATED|GOT_T4)(_STATUS)?$|^T4_STATUS$|^BN$/;
 
 /** The script's definition of `name`, from "name() {" through the first line holding "}". */
 function definition(name: string): string {
@@ -70,7 +68,7 @@ function definition(name: string): string {
 /** Whether the script's check accepts, called as the script calls it, with `env` for cast. */
 async function accepts(call: string, env: Env): Promise<boolean> {
   const program =
-    `set -euo pipefail\nRPC=offline\nT3=${T3}\nT4=${T4}\n${FAKE_CAST}` +
+    `set -euo pipefail\nRPC=offline\nT4=${T4}\n${FAKE_CAST}` +
     CHECKS.map(definition).join("") +
     `${call} || { echo REJECT; exit 7; }\necho ACCEPT\n`;
   const inherited = Object.entries(process.env).filter(([k]) => !FAKE_VARIABLES.test(k));
@@ -87,7 +85,7 @@ describe("the code checks reject every mismatch and failed read", { concurrency:
   // Byte 1 holds an immutable, so it may differ from the simulated deployment.
   const refs = { 7: [{ start: 1, length: 1 }] };
   writeFileSync(artifact, JSON.stringify({ deployedBytecode: { immutableReferences: refs } }));
-  const logic = { BN: bn, CODE: LOGIC_CODE, GOT_T3: T3, GOT_T4: T4 };
+  const logic = { BN: bn, CODE: LOGIC_CODE, GOT_T4: T4 };
   const library = { CODE: LIB_CODE };
   const pool = { CODE: POOL_CODE, CREATED: POOL_CODE };
   const calls = {
@@ -108,10 +106,8 @@ describe("the code checks reject every mismatch and failed read", { concurrency:
     ["logic", "a different immutable byte", { ...logic, CODE: "0x60ff6002" }, true],
     ["logic", "a different byte", { ...logic, CODE: "0x60016003" }, false],
     ["logic", "a different length", { ...logic, CODE: "0x600160" }, false],
-    ["logic", "the wrong POSEIDON_T3", { ...logic, GOT_T3: T4 }, false],
-    ["logic", "the wrong POSEIDON_T4", { ...logic, GOT_T4: T3 }, false],
+    ["logic", "the wrong POSEIDON_T4", { ...logic, GOT_T4: LIB }, false],
     ["logic", "a failed code read", { ...logic, CODE_STATUS: "1" }, false],
-    ["logic", "a failed POSEIDON_T3 read", { ...logic, T3_STATUS: "1" }, false],
     ["logic", "a failed POSEIDON_T4 read", { ...logic, T4_STATUS: "1" }, false],
     ["pool", "matching code", pool, true],
     ["pool", "different code", { ...pool, CODE: "0x6006" }, false],
@@ -141,7 +137,7 @@ describe("the script's text", () => {
         calls++;
       });
     }
-    assert.equal(calls, 4);
+    assert.equal(calls, 3);
   });
 
   test("no inline comparison of two command substitutions; the pinned dispatcher initcode", () => {

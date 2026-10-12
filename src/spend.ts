@@ -85,7 +85,20 @@ export function parseSpend(entry: unknown, rootSlot: unknown): protocol.Spend {
     fee: at(parseUint, "fee"),
     recipient: at(parseAddress, "recipient"),
     authorizer: at(parseAddress, "authorizer"),
+    count: at(parseUint, "count"),
+    packedRanks: at(parseUint, "packed_ranks"),
+    depth: at(parseUint, "depth"),
+    frontier: frontierField(entry),
   };
+}
+
+/** The frontier's roots of a fixture spend entry, padded to MAX_TREES as settle takes them. */
+function frontierField(entry: unknown): bigint[] {
+  const frontier = get(entry, "frontier");
+  if (!Array.isArray(frontier) || frontier.length !== protocol.MAX_TREES) {
+    throw new InputError(`the spend entry's frontier must list ${protocol.MAX_TREES} roots`);
+  }
+  return frontier.map((root, i) => word32(root, `the spend entry's frontier[${i}]`));
 }
 
 /** settle(Spend) calldata followed by the notes, from a fixture spend entry and its root slot. */

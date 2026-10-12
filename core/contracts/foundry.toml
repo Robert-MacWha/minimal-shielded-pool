@@ -3,6 +3,9 @@ src = "src"
 test = "test"
 out = "out"
 libs = []
+# LibSkewMmr and LibSkewMmrVerifier come from the pinned @skew-mmr/contracts that npm ci installs.
+remappings = ["skew-mmr/=../../node_modules/@skew-mmr/contracts/src/"]
+allow_paths = ["../../node_modules/@skew-mmr/contracts"]
 solc_version = "0.8.30"
 optimizer = true
 # 5000 runs, not the default 200. Via IR at 200 to 1,000 runs, this profile's PoseidonT3
@@ -27,6 +30,9 @@ fs_permissions = [
 src = "src"
 out = "out-libsmall"
 libs = []
+# LibSkewMmr and LibSkewMmrVerifier come from the pinned @skew-mmr/contracts that npm ci installs.
+remappings = ["skew-mmr/=../../node_modules/@skew-mmr/contracts/src/"]
+allow_paths = ["../../node_modules/@skew-mmr/contracts"]
 solc_version = "0.8.30"
 optimizer = true
 optimizer_runs = 1

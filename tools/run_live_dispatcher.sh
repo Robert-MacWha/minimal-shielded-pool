@@ -95,9 +95,8 @@ verify_logic_runtime() {
     }
     process.exit(actual.equals(expected) ? 0 : 1);
 JS
-  t3=$(cast call "$addr" 'POSEIDON_T3()(address)' --rpc-url "$RPC") || return 1
   t4=$(cast call "$addr" 'POSEIDON_T4()(address)' --rpc-url "$RPC") || return 1
-  [[ $t3 == "$T3" && $t4 == "$T4" ]]
+  [[ $t4 == "$T4" ]]
 }
 verify_created_runtime() {
   local addr=$1 initcode=$2 actual expected
@@ -131,23 +130,19 @@ VERIFIER_CODE=$(forge inspect --root "$BN" src/Groth16Verifier.sol:Groth16Verifi
 }
 echo "    verifier=$VERIFIER"
 
-echo "==> immutable Poseidon libraries"
-T3=$(FOUNDRY_PROFILE=libsmall forge create --root "$BN" --rpc-url "$RPC" \
-  "${PRICE[@]}" --gas-limit 12500000 --broadcast src/PoseidonT3.sol:PoseidonT3 | deployed)
+echo "==> immutable Poseidon library"
 T4=$(FOUNDRY_PROFILE=libsmall forge create --root "$BN" --rpc-url "$RPC" \
   "${PRICE[@]}" --gas-limit 16000000 --broadcast src/PoseidonT4.sol:PoseidonT4 | deployed)
-T3_CODE=$(FOUNDRY_PROFILE=libsmall forge inspect --root "$BN" src/PoseidonT3.sol:PoseidonT3 deployedBytecode)
 T4_CODE=$(FOUNDRY_PROFILE=libsmall forge inspect --root "$BN" src/PoseidonT4.sol:PoseidonT4 deployedBytecode)
-echo "    poseidonT3=$T3 poseidonT4=$T4"
-verify_library_runtime "$T3" "$T3_CODE" || { echo "PoseidonT3 runtime mismatch"; exit 1; }
+echo "    poseidonT4=$T4"
 verify_library_runtime "$T4" "$T4_CODE" || { echo "PoseidonT4 runtime mismatch"; exit 1; }
 
 echo "==> settlement logic"
 LOGIC=$(forge create --root "$BN" --rpc-url "$RPC" "${PRICE[@]}" \
   --gas-limit 14000000 --broadcast src/ShieldedPoolLogic.sol:ShieldedPoolLogic \
-  --constructor-args "$T3" "$T4" | deployed)
+  --constructor-args "$T4" | deployed)
 LOGIC_BYTECODE=$(forge inspect --root "$BN" src/ShieldedPoolLogic.sol:ShieldedPoolLogic bytecode)
-LOGIC_ARGS=$(cast abi-encode 'constructor(address,address)' "$T3" "$T4")
+LOGIC_ARGS=$(cast abi-encode 'constructor(address)' "$T4")
 LOGIC_INIT="${LOGIC_BYTECODE}${LOGIC_ARGS#0x}"
 EXPECTED_LOGIC=$(cast call --rpc-url "$RPC" --create "$LOGIC_INIT")
 verify_logic_runtime "$LOGIC" "$EXPECTED_LOGIC" || {
@@ -214,9 +209,9 @@ echo "==> publish authenticated post-shield root"
 ROOT_SLOT_DEC=$(publish_root) || exit 1
 [[ -n $ROOT_SLOT_DEC ]] || { echo "publishEpochRoot did not emit ROOT_SLOT" >&2; exit 1; }
 
-MANIFEST_PATH=$MANIFEST node - "$RPC" "$POOL" "$VERIFIER" "$T3" "$T4" "$LOGIC" "$SOURCE0" "$DOMAIN" "$ROOT_SLOT_DEC" "$REVISION" "$POOL_BLOCK" <<'JS'
+MANIFEST_PATH=$MANIFEST node - "$RPC" "$POOL" "$VERIFIER" "$T4" "$LOGIC" "$SOURCE0" "$DOMAIN" "$ROOT_SLOT_DEC" "$REVISION" "$POOL_BLOCK" <<'JS'
 const fs = require("node:fs");
-const keys = ["rpc", "pool", "verifier", "poseidonT3", "poseidonT4", "logic",
+const keys = ["rpc", "pool", "verifier", "poseidonT4", "logic",
   "sourceIdEpoch0", "domain", "_slot_transfer"];
 const cfg = Object.fromEntries(keys.map((key, i) => [key, process.argv[i + 2]]));
 const [revision, deploymentBlock] = process.argv.slice(keys.length + 2);

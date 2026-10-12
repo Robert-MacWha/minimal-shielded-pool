@@ -183,8 +183,8 @@ public, and these patterns can still link a spend to a deposit or another spend:
   every spend from the set: the wallet, anyone who reads it, and any prover the
   wallet hands a spend to.
 - A spend reveals its input epoch, so notes in different epochs never share an
-  anonymity set. Anyone can force a new epoch by filling the tree: `2^20`
-  deposits at about 0.8 million gas each, roughly 800 ETH at 1 gwei and almost
+  anonymity set. Anyone can force a new epoch by filling the tree: `2^21 - 22`
+  deposits at about 0.3 million gas each, roughly 600 ETH at 1 gwei and almost
   nothing at the testnet's base fee.
 - Fees, gas limits and fourth frames differ between wallets and mark their
   spends.
@@ -293,7 +293,7 @@ archive, which nobody guarantees to keep.
 
 - Groth16 knowledge soundness, BN254 pairing security, Poseidon and Keccak
   collision resistance, and secp256k1 unforgeability.
-- Joint UHF hardness of Keccak mod p and circomlib's Poseidon(11), under which
+- Joint UHF hardness of Keccak mod p and a chain of circomlib's Poseidon(2), under which
   [eprint 2025/1500](https://eprint.iacr.org/2025/1500) binds the statement to
   three public signals ([design](docs/design.md#the-statement-is-compressed)).
 - An owner's device that keeps the owner set's keys and signs only the intents

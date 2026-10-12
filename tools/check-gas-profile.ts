@@ -12,8 +12,8 @@
  * Settlement's state budget stays pinned, because running out after approval burns notes.
  *
  * The execution check adds a conservative write/call margin to the maximum measured native
- * case. Tree operation counts are checked over every index; the finite VM measurements are
- * not a formal gas proof for arbitrary forks.
+ * case. MMR operation counts are checked at every size; the finite VM measurements are not a
+ * formal gas proof for arbitrary forks.
  */
 import { resolve } from "node:path";
 
@@ -21,6 +21,7 @@ import { runCli } from "../src/cli/args.ts";
 import { CheckError } from "../src/errors.ts";
 import * as gas from "../src/gas.ts";
 import { canonical, isObject, parse } from "../src/json.ts";
+import { MAX_TREES, TREE_CAPACITY } from "../src/protocol.ts";
 import { check, readText, ROOT } from "./check.ts";
 
 export const PRE_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 294_401n;
@@ -28,16 +29,17 @@ const PRE_PR_12279_KEYED_NONCE_EXECUTION_GAS = 2n * 20_000n;
 // Measured on a devnet running EIP-8250 at f3079a09e8 and EIP-8272 at 824cbc0b0e, the
 // ten-input verifier's proof frame used up to 255,011; the drop from the pre-12279 figure is
 // the keyed-nonce first use leaving the execution dimension for the state one. Hybrid
-// compression cuts the verifier to three public inputs, and the owner's intent digest adds
-// about 610: on native ethrex 247e2dd2 the proof frame uses 210,659, plus 90 with a fourth
-// frame and 27 when nf1 > nf2 (the dispatcher sorts the nonce keys), so at most 210,776.
-export const POST_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 210_776n;
+// compression cuts the verifier to three public inputs. With the owner's intent digest and the
+// MMR's frontier in the statement, which the dispatcher also opens against the root, on native
+// ethrex 247e2dd2 the proof frame uses 217,491, plus 90 with a fourth frame, 27 when nf1 > nf2
+// (the dispatcher sorts the nonce keys) and up to 1,098 for a deep frontier, so at most 218,706.
+export const POST_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 218_706n;
 // The proof frame needs a larger limit than it uses. Each nested call keeps back 1/64 of the
 // gas it could forward (EIP-150), once from the dispatcher to the verifier and once from the
 // verifier to the pairing precompile. On native ethrex 247e2dd2 the heaviest spend (a fourth
-// frame and nf1 > nf2) needs a limit of 216,751; 216,750 fails. Below that the verifier runs
-// out of gas and the dispatcher reports an invalid proof.
-const MIN_WORKING_VERIFY_FRAME_GAS = 216_751n;
+// frame, nf1 > nf2 and a first payment's notes) needs a limit of 224,681; 224,680 fails. Below
+// that the verifier runs out of gas and the dispatcher reports an invalid proof.
+const MIN_WORKING_VERIFY_FRAME_GAS = 224_681n;
 // The pool grammar permits exactly one 72-byte recent-root tuple, pinned by the dispatcher's
 // `frameParam(0, 0x04) == 72`; that shape's verifier frame measured 5,579 gas, under the
 // 8,000-gas wallet default. The figure says nothing about the sixteen tuples EIP-8272 allows:
@@ -48,17 +50,17 @@ export const MAX_OBSERVED_RECENT_ROOT_FRAME_GAS = 5_579n;
 const CONSERVATIVE_VERIFY_STATE_BOUND =
   gas.SPEND_NONCE_KEY_COUNT * gas.KEYED_NONCE_FIRST_USE_STATE_GAS;
 
-// Rollover clears 21 subtree slots, then may create two output subtrees. Five new slots
-// conservatively cover zero-valued prior hash outputs too; removing the commitment registry
-// does not justify reducing this to three.
-const MAX_SSTORE_OPERATIONS = 31n;
+// A rollover writes the final root, the epoch, the root and the MMR's packed ranks, depth and
+// count, and each append a root, a chain, the packed ranks and the depth and count (treeShapes).
+// New slots: each of two appends may start a tree at a depth no epoch has reached, a new root
+// and chain, and a credit may be new; a rollover writes fewer.
+const MAX_SSTORE_OPERATIONS = 15n;
 const MAX_NEW_STORAGE_SLOTS = 5n;
 
-// Pinned ethrex 247e2dd2, long carry at index 2^19-1, two outputs and credit, carrying a
-// first payment's 1,184 note bytes (11,830 gas more than without notes). See
-// test/native/native-report.json. The previous rollover-only Foundry measurement missed this
-// 39-hash path and did not bound native gas.
-const NATIVE_MAX_OBSERVED_SETTLEMENT_GAS = 1_435_539n;
+// Pinned ethrex 247e2dd2, two outputs that each merge two trees and a new credit, carrying a
+// first payment's 1,184 note bytes. See test/native/native-report.json. An append hashes at
+// most once, so no settlement repeats the depth-20 tree's 39-hash long carry.
+const NATIVE_MAX_OBSERVED_SETTLEMENT_GAS = 229_284n;
 // EIP-8038: cold access (2,100) + STORAGE_WRITE (10,000).
 const EIP_8038_COLD_WRITE_GAS = 12_100n;
 
@@ -78,23 +80,39 @@ const FROZEN_VERIFY_FRAME_GAS = 320_000n;
 const FROZEN_SETTLE_FRAME_GAS = 2_000_000n;
 
 /**
- * The most hashes and storage writes one append makes at any index: 39 and 6 without a
- * rollover, 21 and 31 with one.
+ * The most hashes and storage writes one settlement's appends make at any MMR size: 2 and 10
+ * without a rollover, 0 and 15 with one. An append merges the two smallest trees, with one hash,
+ * when their ranks are equal (LibSkewMmr); a settlement also writes the root and a credit.
+ * The MMR never holds more than MAX_TREES trees below TREE_CAPACITY notes.
  */
 function treeShapes() {
-  const capacity = 1 << 20;
+  const capacity = Number(TREE_CAPACITY);
   const shapes = { no_rollover: [0, 0], rollover: [0, 0] };
+  /** Appends to an MMR's ranks, smallest last; returns the hashes it took. */
+  const append = (ranks: number[]) => {
+    const merges = ranks.length >= 2 && ranks.at(-1) === ranks.at(-2);
+    if (!merges) {
+      ranks.push(0);
+      return 0;
+    }
+    ranks.pop();
+    ranks.push(ranks.pop()! + 1);
+    return 1;
+  };
+  const ranks: number[] = [];
   for (let start = 0; start <= capacity; start++) {
+    check(ranks.length <= MAX_TREES, `the MMR holds ${ranks.length} trees at ${start} notes`);
     for (const count of [1, 2]) {
       const rolled = count > capacity - start;
-      const index = rolled ? 0 : start;
-      let hashes = index + count === capacity ? 0 : 20;
-      // An append at i rehashes as many levels as i + 1 has trailing zero bits.
-      for (let i = index; i < index + count; i++) hashes += 31 - Math.clz32((i + 1) & -(i + 1));
+      // Two appends read at most the three smallest trees.
+      const after = rolled ? [] : ranks.slice(-3);
+      let hashes = 0;
+      for (let i = 0; i < count; i++) hashes += append(after);
       const shape = rolled ? shapes.rollover : shapes.no_rollover;
       shape[0] = Math.max(shape[0], hashes);
-      shape[1] = Math.max(shape[1], (rolled ? 25 : 0) + 2 * count + 2);
+      shape[1] = Math.max(shape[1], (rolled ? 5 : 0) + 4 * count + 2);
     }
+    if (start < capacity) append(ranks);
   }
   return shapes;
 }
@@ -124,9 +142,9 @@ export function checkGasProfile(root = ROOT): string {
   if (CONSERVATIVE_SETTLEMENT_STATE_BOUND >= gas.SETTLE_FRAME_STATE_GAS) {
     throw new CheckError("the conservative settlement state bound exceeds SETTLE_FRAME_STATE_GAS");
   }
-  // The rollover-based 832,626+SSTORE bound misses long-carry at 262,143 and 524,287 leaves:
-  // native ethrex 247e2dd2 OOGs settlement at 1.4M after VERIFY and approval succeed. The
-  // dispatcher pin is 2M execution for that reproduced path (plus EIP-150 forwarding). 2M is
+  // The depth-20 tree's long carry at 262,143 and 524,287 leaves ran out of gas at 1.4M after
+  // VERIFY and approval succeeded, which set the dispatcher's 2M pin. The MMR's settlements
+  // need far less, and the pin stays: it is part of the immutable dispatcher profile. 2M is
   // not a proof of every settlement shape.
   check(gas.SETTLE_FRAME_GAS === FROZEN_SETTLE_FRAME_GAS, "SETTLE_FRAME_GAS is not 2,000,000");
   // The proof itself writes nothing. This exact budget exists only because its payment
@@ -179,7 +197,8 @@ export function checkGasProfile(root = ROOT): string {
   // bound above charges the larger.
   const [short, long] = gas.SETTLE_FRAME_DATA_BYTES;
   check(
-    gas.SPEND_NOTES_BYTES.join() === "96,1184" && gas.SETTLE_FRAME_DATA_BYTES.join() === "484,1572",
+    gas.SPEND_NOTES_BYTES.join() === "96,1184" &&
+      gas.SETTLE_FRAME_DATA_BYTES.join() === "1220,2308",
     "the note and settlement lengths changed",
   );
   const lengths = `or(eq(settleLength, ${short}), eq(settleLength, ${long}))`;

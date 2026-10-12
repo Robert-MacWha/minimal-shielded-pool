@@ -1,7 +1,7 @@
 /**
  * src/poseidon.ts against circomlibjs, through the vectors tools/export-vectors.ts wrote from
- * it: 16 inputs each for Poseidon(2), Poseidon(3) and Poseidon(11), the pool's tagged hash
- * chain, the empty depth-20 root and an owner set's root. The circuit, the Solidity library and the client share
+ * it: 16 inputs each for Poseidon(2) and Poseidon(3), the pool's tagged hash chain and an owner
+ * set's root. The circuit, the Solidity library and the client share
  * these constants, so a mismatch here means the client computes notes the pool cannot match.
  * tools/export-vectors.ts and tools/poseidon-sol.ts must still write the committed vectors,
  * constants and Solidity libraries; that check needs forge on PATH. Runtime: about 1.5 s.
@@ -17,14 +17,14 @@ import { OwnerSet } from "../src/owner.ts";
 import { poseidon } from "../src/poseidon.ts";
 import * as protocol from "../src/protocol.ts";
 
-const { DEPTH, TAG_LEAF, TAG_PK, p2, tagged } = protocol;
+const { TAG_LEAF, TAG_PK, p2, tagged } = protocol;
 const ROOT = resolve(import.meta.dirname, "..");
 const vectors = JSON.parse(
   readFileSync(new URL("vectors/poseidon_bn254_vectors.json", import.meta.url), "utf8"),
   (_key, value) => (typeof value === "string" ? BigInt(value) : value),
 );
 
-for (const width of ["poseidon2", "poseidon3", "poseidon11"]) {
+for (const width of ["poseidon2", "poseidon3"]) {
   test(`${width} matches circomlibjs`, () => {
     const cases: { in: bigint[]; out: bigint }[] = vectors[width];
     assert.equal(cases.length, 16);
@@ -39,10 +39,9 @@ test("the pool's hash chain matches circomlibjs", () => {
   const pk = tagged(TAG_PK, c.owner_root, c.nk);
   const inner = p2(pk, c.rho);
   const cm = tagged(TAG_LEAF, inner, c.value);
-  // The domain includes the input epoch, and the constrained Merkle index distinguishes
-  // independently funded occurrences of the same commitment. The tag is the literal 4, as in
-  // spend.circom, so the check does not rest on the library's own constant.
-  const nf = (leaf: bigint) => tagged(4n, p2(c.domain, c.nk), p2(leaf, c.index));
+  // The domain includes the input epoch. The tag is the literal 4, as in spend.circom, so the
+  // check does not rest on the library's own constant.
+  const nf = (leaf: bigint) => tagged(4n, p2(c.domain, c.nk), leaf);
   assert.equal(pk, c.owner_pk, "owner_pk");
   assert.equal(inner, c.inner, "inner");
   assert.equal(cm, c.cm, "cm");
@@ -54,7 +53,7 @@ test("the pool's hash chain matches circomlibjs", () => {
   assert.equal(protocol.ownerPk(c.owner_root, c.nk), c.owner_pk, "ownerPk()");
   assert.equal(protocol.inner(c.owner_pk, c.rho), c.inner, "inner()");
   assert.equal(protocol.commitment(c.owner_pk, c.rho, c.value), c.cm, "commitment()");
-  assert.equal(protocol.nullifier(c.domain, c.nk, c.cm, c.index), c.nf, "nullifier()");
+  assert.equal(protocol.nullifier(c.domain, c.nk, c.cm), c.nf, "nullifier()");
 });
 
 test("an owner set's root matches circomlibjs, with empty leaves 0", () => {
@@ -64,14 +63,6 @@ test("an owner set's root matches circomlibjs, with empty leaves 0", () => {
   for (let d = 0; d < protocol.OWNER_DEPTH; d++) zero = p2(zero, zero);
   assert.equal(zero, o.root_empty);
   assert.equal(new OwnerSet(o.addresses).root, o.root);
-});
-
-test("the empty depth-20 root matches circomlibjs and protocol's EMPTY_ROOT", () => {
-  assert.equal(vectors.tree.depth, DEPTH);
-  let zero = 0n;
-  for (let d = 0; d < DEPTH; d++) zero = p2(zero, zero);
-  assert.equal(zero, vectors.tree.root_empty);
-  assert.equal(protocol.EMPTY_ROOT, zero);
 });
 
 // Each generator writes into the checkout it runs from, so both run from copies under a

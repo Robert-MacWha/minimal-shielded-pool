@@ -33,13 +33,13 @@ import {
   sinkOutputs,
 } from "./protocol.ts";
 import { secureRng, seededRng } from "./random.ts";
-import { Tree, buildWitness, dummyInput, newAuthorizer } from "./wallet.ts";
+import { OwnerTree, Tree, buildWitness, dummyInput, newAuthorizer } from "./wallet.ts";
 
 /** The test placeholder recipient, refused off the test chain and pool. */
 const PLACEHOLDER_RECIPIENT = "0x00000000000000000000000000000000cafebabe";
 const SEED = 20260702n;
 const EPOCH = 0n;
-const SHIELD = 10n ** 18n;
+const SHIELD = 10n ** 17n;
 const PAYMENT = (SHIELD * 60n) / 100n;
 const FEE = (SHIELD * 5n) / 100n;
 const CHANGE = SHIELD - PAYMENT - FEE;
@@ -181,7 +181,7 @@ export async function generateSmoke(options: SmokeOptions, deps: fixtures.Genera
   await prover.assertUnprovable({ ...ww, recipient: "0" }, "withdrawal_without_recipient");
   const outside = aliceOwner.set.leaf(fixtures.OWNER_LEAVES - 1).address;
   await prover.assertUnprovable({ ...ww, owner: String(outside) }, "owner_outside_the_set");
-  const bobSet = new Tree(OWNER_DEPTH);
+  const bobSet = new OwnerTree(OWNER_DEPTH);
   for (const address of bobOwner.set.addresses) bobSet.append(address);
   const emptyPath = bobSet.authPath(BigInt(fixtures.OWNER_LEAVES));
   const emptyLeaf = {

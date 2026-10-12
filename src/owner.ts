@@ -17,7 +17,7 @@ import * as crypto from "node:crypto";
 import { concat, toBigint, word } from "./bytes.ts";
 import { addressOf, SECP256K1_N, signHash } from "./frametx.ts";
 import { OWNER_DEPTH } from "./protocol.ts";
-import { Tree, type OwnerLeaf } from "./wallet.ts";
+import { OwnerTree, type OwnerLeaf } from "./wallet.ts";
 
 const LABEL = "minimal-shielded-pool:owner:v1:";
 export const OWNER_SET_CAPACITY = 2 ** OWNER_DEPTH;
@@ -34,7 +34,7 @@ export interface OwnerSigner {
 export class OwnerSet {
   readonly addresses: readonly bigint[];
   readonly root: bigint;
-  readonly #tree = new Tree(OWNER_DEPTH);
+  readonly #tree = new OwnerTree(OWNER_DEPTH);
 
   constructor(addresses: readonly bigint[]) {
     if (addresses.length === 0 || addresses.length > OWNER_SET_CAPACITY) {

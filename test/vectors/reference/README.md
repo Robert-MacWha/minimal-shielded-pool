@@ -9,7 +9,7 @@ vectors by hand, in the same commit, and the commit message gives the reason.
 | File | What it pins |
 |---|---|
 | `protocol.json` | Poseidon, owner key, inner, commitment, nullifier key and nullifier, domain, statement, alpha, beta, gamma, fingerprint, sinks, EIP-8272 recent-root keys, selectors, topics and the gas profile |
-| `wallet.json` | Tree roots and authentication paths (up to 40 leaves, and repeated-leaf trees up to 2^20), a full tree refusing one more leaf, two full circuit witnesses, and witnesses the circuit would refuse |
+| `wallet.json` | Witnesses the circuit would refuse, built on the leaves and domain of the first of two witness cases |
 | `frametx.json` | RLP; frame transaction encodings, signature hashes and every gas figure for a set of self-test transactions, random transactions and refused ones; the signed smoke spends of the pool client |
 | `signing.json` | secp256k1 signatures over edge and random hashes, addresses, recovery, EIP-55 checksums and stored private keys |
 | `abi.json` | `settle`, `shield`, `publishEpochRoot`, `domain`, `claimWithdrawal` and proof-frame bytes, including statement words aliased to x + P; verifier calls; settle decoding |
@@ -22,5 +22,4 @@ class it raised, a Python class name such as `OverflowError`; `REFERENCE_ERROR_K
 test translates it to the client's error kind. Inputs that only the earlier implementation's
 lenient parsers accepted, such as hex without `0x`, are left out, since the client refuses them
 on purpose. A long byte string appears as `{"prefix", "pattern", "length"}`: the prefix, then the
-pattern repeated up to `length` bytes. In a tree path, `null` is the empty subtree of that height
-(`zeros`) and `"u"` the repeated-leaf subtree (`uniform`).
+pattern repeated up to `length` bytes.

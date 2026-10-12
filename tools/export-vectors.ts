@@ -9,9 +9,8 @@
  * vector is computed with BOTH the reference and the wasm implementation and asserted equal,
  * so a constants mismatch inside circomlibjs itself would fail here, not later.
  *
- * Vector set: zero, unit, counter, and LCG-seeded states for Poseidon(2), Poseidon(3) and
- * Poseidon(11) (hybrid compression's beta), plus the pool chain from seed 2026 (owner_pk, cm,
- * the domain-separated nf, out_cm), the depth-20 incremental-tree fixtures and a depth-16
+ * Vector set: zero, unit, counter, and LCG-seeded states for Poseidon(2) and Poseidon(3), plus
+ * the pool chain from seed 2026 (owner_pk, cm, the domain-separated nf, out_cm) and a depth-16
  * owner set.
  */
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -27,7 +26,6 @@ interface Poseidon {
 }
 
 const ROOT = resolve(import.meta.dirname, "..");
-const DEPTH = 20;
 const OWNER_DEPTH = 16;
 
 /**
@@ -80,27 +78,24 @@ async function exportVectors() {
   // Drawn after the others so that their values stay as earlier vectors drew them.
   const domain = next(); // stands in for keccak(TAG||chain||pool||epoch) mod p
   const owner_root = next(); // stands in for the root of an owner set
-  const index = 37n;
   const owner_pk = p3(1n, owner_root, nk);
   const inner = p2(owner_pk, rho);
   const cm = p3(2n, inner, value);
-  // Position-bound nullifiers, mirroring core/circuits/spend.circom. Even with the same secret
-  // and position, a zero-value dummy has a different identity.
-  const nf = p3(4n, p2(domain, nk), p2(cm, index));
-  const nf2 = p3(4n, p2(domain, nk), p2(p3(2n, inner, 0n), index));
+  // Nullifiers, mirroring core/circuits/spend.circom. Even with the same secret, a zero-value
+  // dummy has a different identity.
+  const nf = p3(4n, p2(domain, nk), cm);
+  const nf2 = p3(4n, p2(domain, nk), p3(2n, inner, 0n));
   const out_cm1 = p3(2n, out_inner1, out_value1);
   const out_cm2 = p3(2n, out_inner2, out_value2);
   const chain = {
     ...{ owner_root, nk, rho, value, out_inner1, out_inner2, out_value1, out_value2, domain },
-    ...{ index, owner_pk, inner, cm, nf, nf2, out_cm1, out_cm2 },
+    ...{ owner_pk, inner, cm, nf, nf2, out_cm1, out_cm2 },
   };
 
-  // Incremental-tree fixtures: the root after each append, as ShieldedPoolLogic's _insert and
-  // _computeRoot (core/contracts/src/ShieldedPoolLogic.sol) compute it, at depth 20, and an
-  // owner set's root at depth 16, where the leaves are addresses and empty leaves are 0.
+  // An owner set's root at depth 16, where the leaves are addresses and empty leaves are 0.
   const zeros = [0n];
-  for (let l = 0; l < DEPTH; l++) zeros.push(p2(zeros[l], zeros[l]));
-  function incrementalRoot(leaves: bigint[], depth = DEPTH): bigint {
+  for (let l = 0; l < OWNER_DEPTH; l++) zeros.push(p2(zeros[l], zeros[l]));
+  function incrementalRoot(leaves: bigint[], depth: number): bigint {
     const filled: bigint[] = Array(depth).fill(0n);
     let root = zeros[depth];
     leaves.forEach((leaf, index) => {
@@ -118,21 +113,11 @@ async function exportVectors() {
     return root;
   }
 
-  const [cm0, cm1] = [1n, 2n];
   const owners = Array.from({ length: 3 }, () => next() & ((1n << 160n) - 1n)); // addresses
   const vectors = {
     poseidon2: cases(2),
     poseidon3: cases(3),
-    poseidon11: cases(11),
     pool_chain: Object.fromEntries(Object.entries(chain).map(([k, v]) => [k, v.toString()])),
-    tree: {
-      depth: DEPTH,
-      cm0: cm0.toString(),
-      cm1: cm1.toString(),
-      root_empty: zeros[DEPTH].toString(),
-      root_after_cm0: incrementalRoot([cm0]).toString(),
-      root_after_cm0_cm1: incrementalRoot([cm0, cm1]).toString(),
-    },
     owner_set: {
       depth: OWNER_DEPTH,
       addresses: owners.map(String),
@@ -160,7 +145,6 @@ async function exportVectors() {
     prime: p.toString(),
     t3: params(1, 57),
     t4: params(2, 56),
-    t12: params(10, 60),
   };
   return { vectors, constants };
 }
@@ -176,6 +160,6 @@ if (import.meta.main) {
     mkdirSync(dirname(path), { recursive: true });
     writeFileSync(path, JSON.stringify(value, null, 1));
   }
-  console.log(`wrote ${vpath} (16+16+16 vectors + pool chain + trees)`);
+  console.log(`wrote ${vpath} (16+16 vectors + pool chain + owner set)`);
   console.log(`wrote ${cpath}`);
 }

@@ -148,8 +148,8 @@ function paid(ownerPk: bigint, channel: n.Outgoing, value: bigint) {
 }
 type Paid = ReturnType<typeof paid>;
 
-function nullifierOf(keys: n.WalletKeys, cm: bigint, index: bigint, epoch = 0n): bigint {
-  return nullifier(domainScalar(CHAIN, POOL, epoch), keys.nk, cm, index);
+function nullifierOf(keys: n.WalletKeys, cm: bigint, epoch = 0n): bigint {
+  return nullifier(domainScalar(CHAIN, POOL, epoch), keys.nk, cm);
 }
 
 /** Bob shields, pays Alice four ways and withdraws; Carol pays Alice, then Bob. */
@@ -165,7 +165,7 @@ function story(): Chain {
   const toAlice = n.openChannel(ALICE.address().hex());
   let payee = paid(ALICE.ownerPk, toAlice, ETH);
   let change = paid(BOB.ownerPk, bobSelf, 4n * ETH - FEE);
-  pay(payee, change, [nullifierOf(BOB, bobLeaf.cm, bobLeaf.index), 1n]); // with a dummy's nullifier
+  pay(payee, change, [nullifierOf(BOB, bobLeaf.cm), 1n]); // with a dummy's nullifier
   assert.deepEqual(toAlice.ciphertext, payee.ciphertext);
   assert.equal(toAlice.nextIndex, 1n);
   // Until that payment is final, the channel takes no other payment. The next payment's outputs
@@ -309,7 +309,7 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   assert.deepEqual([alice, bob, carol].map(kemChannels), [3, 1, 0]);
   // Each note's nullifier is the circuit's, for a later spend.
   for (const s of [alice, bob]) {
-    for (const r of s.notes.values()) assert.equal(r.nullifier, nullifierOf(s.keys, r.cm, r.index));
+    for (const r of s.notes.values()) assert.equal(r.nullifier, nullifierOf(s.keys, r.cm));
   }
   // A note in a later epoch takes that epoch's domain, and one published twice in an event is
   // found once.
@@ -321,9 +321,17 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   // its notes. A scanner that has seen epoch 0 full takes the leaf.
   raises(() => new Scanner(ALICE, CHAIN, POOL).scan(twice), "missing pool logs");
   const fullEpoch0 = { ...new Scanner(ALICE, CHAIN, POOL).toJson(), tree: { "0": TREE_CAPACITY } };
-  const lateFound = Scanner.fromJson(ALICE, parse(stringify(fullEpoch0))).scan(twice);
+  const lateScanner = Scanner.fromJson(ALICE, parse(stringify(fullEpoch0)));
+  const lateFound = lateScanner.scan(twice);
   assert.equal(lateFound.length, 1);
-  assert.equal(lateFound[0].nullifier, nullifierOf(ALICE, late.cm, 0n, 1n));
+  assert.equal(lateFound[0].nullifier, nullifierOf(ALICE, late.cm, 1n));
+  // A later copy of that commitment in the epoch shares its nullifier, so it is not counted,
+  // and spending one leaves nothing unspent.
+  const copy = { ...twice, block: 2n, leaves: [{ ...leaf, index: 1n }] };
+  assert.equal(lateScanner.scan(copy).length, 0);
+  const spendLate = { block: 3n, tx: 0n, call: 0, notes: new Uint8Array(), leaves: [] };
+  lateScanner.scan({ ...spendLate, spent: [lateFound[0].nullifier] });
+  assert.equal(lateScanner.unspent().length, 0);
   // A direct secret past the gap stays hidden until the wallet looks further.
   const near = recover(ALICE, chain.events, { gap: 3 });
   assert.ok(!values(near).includes(ETH / 5n));
@@ -590,7 +598,8 @@ test("a ciphertext that lands twice opens one channel", () => {
   }
   const scanner = recover(ALICE, chain.events);
   assert.equal(scanner.incoming.filter((i) => i.kind === "kem").length, 1);
-  assert.equal(scanner.notes.size, 2);
+  // The two copies share a nullifier, so only one can be spent and only one is counted.
+  assert.equal(scanner.notes.size, 1);
 });
 
 test("channels: one ciphertext per transaction, a bounded window, and late payments found", () => {
@@ -670,12 +679,12 @@ test("hidden calls: calls left out of eth_getLogs are rebuilt from receipts or c
   const revertedSpend = {
     notes: n.spendNotes(dummy(), dummy()),
     leaves: [],
-    spent: [nullifierOf(ALICE, first.cm, first.index), 14n],
+    spent: [nullifierOf(ALICE, first.cm), 14n],
   };
   // Alice spends her direct payment in full: a settlement with no leaf. Left out of the logs,
   // it leaves no gap, so her note still shows as unspent.
   const [direct] = chain.events[3].leaves;
-  chain.add(n.spendNotes(dummy(), dummy()), [], [nullifierOf(ALICE, direct.cm, direct.index), 13n]);
+  chain.add(n.spendNotes(dummy(), dummy()), [], [nullifierOf(ALICE, direct.cm), 13n]);
   const bobShield = paid(BOB.ownerPk, n.directChannel(BOB.ownerPk, BOB.selfSecret), ETH);
   chain.add(n.shieldNotes(bobShield.note), [bobShield.cm], [], SHIELD);
   const aliceNotes = new Map([ETH, ETH / 2n, ETH / 5n, 2n * ETH, ETH / 10n].map((v) => [v, false]));
@@ -886,9 +895,9 @@ test("state upgrade: only an earlier version's state with an epoch closed short 
   const cases = [
     { version: 2, tree: { "0": 5n }, short: null },
     { version: 2, tree: { "0": full, "1": full, "2": 3n }, short: null },
-    { version: 2, tree: { "0": full - 1n, "1": 2n }, short: "epoch 0 closed with 1048575 of" },
+    { version: 2, tree: { "0": full - 1n, "1": 2n }, short: `epoch 0 closed with ${full - 1n} of` },
     { version: 2, tree: { "0": full, "1": full - 3n, "2": 1n }, short: "epoch 1 closed with" },
-    { version: 2, tree: { "0": full, "2": 1n }, short: "epoch 1 closed with 0 of 1048576" },
+    { version: 2, tree: { "0": full, "2": 1n }, short: `epoch 1 closed with 0 of ${full}` },
     // A scan of version 3 began epoch 1 only after reading receipts.
     { version: 3, tree: { "0": full - 1n, "1": 2n }, short: null },
   ];
@@ -941,7 +950,8 @@ test("state upgrade: a rescan finds the payment an earlier version missed and ke
   const saved = json({ ...earlier.toJson(), version: 2, tree, ...checkpoint });
   // Loading it keeps everything but the scan's place, which goes back to the deployment block.
   const scanner = Scanner.fromJson(ALICE, saved);
-  assert.ok(scanner.rescanReason?.includes("epoch 0 closed with 1048575 of 1048576 leaves"));
+  const short = `epoch 0 closed with ${TREE_CAPACITY - 1n} of ${TREE_CAPACITY} leaves`;
+  assert.ok(scanner.rescanReason?.includes(short));
   assert.deepEqual(json(scanner.toJson()), { ...saved, ...RESCAN });
   readEpoch0(scanner);
   const node = await serve(chain, { block: rollover }, { hidden: [0] });
@@ -1317,7 +1327,8 @@ test("CLI: an earlier version's state is rescanned before direct-secret issues a
     const saved = readFileSync(state, "utf8");
     const args = ["--config", writeConfig(dir, node.url), "--state", state, ...WALLET];
     const reason =
-      "since it shows epoch 0 closed with 1048575 of 1048576 leaves, and the earlier version " +
+      `since it shows epoch 0 closed with ${TREE_CAPACITY - 1n} of ${TREE_CAPACITY} leaves, ` +
+      "and the earlier version " +
       "that saved it could miss a payment in an epoch's last leaves";
     // direct-secret issues nothing and saves nothing before the rescan.
     const first = `scan first, which rescans the state from the deployment block, ${reason}`;

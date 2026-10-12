@@ -24,6 +24,7 @@ import {
 } from "../src/frametx.ts";
 import { parse } from "../src/json.ts";
 import { InputError, PoolError } from "../src/errors.ts";
+import { SETTLE_SPEND_BYTES } from "../src/gas.ts";
 import { intentDigest, recentRootTuple, sourceId } from "../src/protocol.ts";
 import {
   authorizerKey,
@@ -86,7 +87,8 @@ const frameMutations = (name: string, i: number): Mutation[] =>
   ]);
 
 function commonMutations(tx: FrameTx): Mutation[] {
-  const strides = Math.ceil((tx.frames[2].data.length - (4 + 12 * 32)) / 48);
+  const strides = Math.ceil((tx.frames[2].data.length - SETTLE_SPEND_BYTES) / 48);
+  const words = (SETTLE_SPEND_BYTES - 4) / 32;
   return [
     ["chain_id", (x) => void (x.chainId += 1n)],
     ["nonce_key", (x) => void (x.nonceKeys[0] ^= 1n)],
@@ -102,12 +104,12 @@ function commonMutations(tx: FrameTx): Mutation[] {
     // Eight proof words, then hybrid compression's beta.
     ...Array.from({ length: 9 }, (_, w): Mutation => [`proof_word_${w}`, flip(1, w * 32)]),
     ...frameMutations("settle", 2),
-    ...Array.from({ length: 12 }, (_, w): Mutation => [`settle_word_${w}`, flip(2, 4 + w * 32)]),
-    // After the twelve words come the notes, in the transfer a 1088-byte ML-KEM ciphertext and
-    // then two 48-byte notes. Flip one byte in every 48 of those bytes.
+    ...Array.from({ length: words }, (_, w): Mutation => [`settle_word_${w}`, flip(2, 4 + w * 32)]),
+    // After the words, the frontier included, come the notes, in the transfer a 1088-byte ML-KEM
+    // ciphertext and then two 48-byte notes. Flip one byte in every 48 of those bytes.
     ...Array.from({ length: strides }, (_, i): Mutation => [
       `notes_byte_${48 * i}`,
-      flip(2, 388 + 48 * i),
+      flip(2, SETTLE_SPEND_BYTES + 48 * i),
     ]),
     ["signature_scheme", (x) => void (x.signatures[0].scheme = SCHEME.P256)],
     ["signature_signer", (x) => void (x.signatures[0].signer ^= 1n)],
@@ -139,9 +141,10 @@ const ACTION: Action = {
   stateLimit: 100_000n,
 };
 
-// Each spend's signature hash and whole signed transaction are also the Python client's
+// Each spend's signature hash and whole signed transaction were the Python client's
 // (test_pool_envelope_binding._signed at commit 2386147, with cast's settle calldata and
-// eth-keys 0.7.0's RFC 6979 signatures), so the bound transaction is the one it signed.
+// eth-keys 0.7.0's RFC 6979 signatures) until skew-mmr-v1 added the frontier to the
+// settlement, which re-pinned them with the smoke entries' frontiers.
 const spends: [
   name: string,
   build: () => FrameTx,
@@ -154,41 +157,41 @@ const spends: [
     "transfer: three frames",
     () => signed("transfer"),
     [],
-    78,
-    "50bff46fdd226f3b3a008968f82e75341daa51af2b3b137236b8dd2ddeec63c7",
-    "a112871a6a09e3dfef2748758c3ed964f697c8a61b617eb050c89d7e3eb690fd",
+    101,
+    "97c25b7bddaaf9bbad6946659dc5126190828bde712fee9c286d3a7b86f32d06",
+    "e71dab10550632fc9b67bad2962a723ab1c96c804862de5dd588be9d866a9fc3",
   ],
   [
     "transfer with a gas-only action: four frames",
     () => signed("transfer", ACTION),
     actionMutations,
-    87,
-    "da502e7538ad333fa99d267bff2ace16af330bdfccff0a6235d3c5c451233ce2",
-    "d5ed41e89bc63b9dfd74848975614b068d513f0da8d2e9329ecc9792f96f2f2f",
+    110,
+    "0bc5373f55510f725d65bfc3e711edc0927c302db47211ae1629eb4d4bf97f83",
+    "fb2d61ddb10f568e5b9e14ff7888be87862dd381de7e9210aa873fc2761142d3",
   ],
   [
     "withdraw with the default claim: four frames",
     () => signed("withdraw"),
     claimMutations,
-    63,
-    "c996c0fb2e0756bd4362d26af47946c8d3d126f0302ec11144a1f0246633901a",
-    "b64ec2261387e24e4734bcdb47814aaa98487c6c673f03cffb2f65b9ec6da40e",
+    86,
+    "926146cc14290db20a9445cafb5fe190365b0b978f20411380f336782c8c1bbf",
+    "7027cc228ace729f6ff73f47744e836829b5b4a4982ffd2e2a9a54df372022b1",
   ],
   [
     "withdraw without a tail: three frames",
     () => signed("withdraw", null, true),
     [],
-    55,
-    "400cc451e05a9be87ee9acf7cbecdc46ed7943271a6713c02da036302af65ba9",
-    "6889b7676ea78afd035295e848f076467bc8736b2a11fef388741a9603347c5c",
+    78,
+    "d39d399b8a1df33f102968c9becf4c3f5933461875a37f03503d37182542225b",
+    "369c49594b75a1d43647850bd711f7b363a14bd6a6c7e6ccfdf96a19c5f56a33",
   ],
   [
     "withdraw with a custom action: four frames",
     () => signed("withdraw", ACTION),
     actionMutations,
-    64,
-    "b38d3a7b271d034ff03fc195fc334d0421b15c7d19cc674d10d2242b87827207",
-    "4fd5c92d9a2b9d1163e751df9287f637e64a8c13ffa07e7072ad3f053eb8835f",
+    87,
+    "21a1f0126ebf4a662a0976b8166e42fd11e80d045bb0267fc63787f758363015",
+    "bde6bb9404527c6144d622fd9fa8e9b1e46825ec415191e597adeb4f69ba8d55",
   ],
 ];
 

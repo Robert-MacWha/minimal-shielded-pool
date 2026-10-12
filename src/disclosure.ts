@@ -1,8 +1,8 @@
 /**
  * Disclosure receipts: which notes a spend consumed and created, without any key that finds or
- * spends other notes in other epochs. A nullifier is Poseidon3(4, K, Poseidon2(cm, index)) with
- * the domain key K = Poseidon2(D, nk), so K and a note's position find the spend that published
- * its nullifier, and the proof ties that nullifier to exactly this note, yet only the owner set's
+ * spends other notes in other epochs. A nullifier is Poseidon3(4, K, cm) with the domain key
+ * K = Poseidon2(D, nk), so K and a note's commitment find the spend that published its
+ * nullifier, and the proof ties that nullifier to exactly this note, yet only the owner set's
  * device can authorize a spend. A receipt proves these links and amounts, not who presents it or
  * where the funds came from before the deposit. Notes paid to one address share its nullifier key
  * nk, so their K covers every note of that address in the epoch. Export cannot tell such a key
@@ -110,7 +110,7 @@ export async function exportReceipt(
       : [...leaves.values()].filter((leaf) => leaf.cm === cm);
     for (const { epoch, index, created } of places) {
       const key = protocol.domainKey(protocol.domainScalar(chainId, pool, epoch), note.nk);
-      const nf = own ? protocol.nullifierFromKey(key, cm, index) : undefined;
+      const nf = own ? protocol.nullifierFromKey(key, cm) : undefined;
       const spent = nf === undefined ? undefined : spentIn.get(nf);
       // ethrex leaves out of eth_getLogs every log of a frame transaction whose fourth frame
       // failed, settlement included.
@@ -303,7 +303,7 @@ async function verify(chain: Chain, receipt: unknown, poolCheck: PoolCheck) {
       spent = lower(n.spent, "spent");
       const spend = await spendOf(spent);
       if (spend.epoch !== epoch) throw fail(`${spent} spends epoch ${spend.epoch}, not ${epoch}`);
-      nf = protocol.nullifierFromKey(parseHex(n.nullifierKey, "nullifierKey"), cm, index);
+      nf = protocol.nullifierFromKey(parseHex(n.nullifierKey, "nullifierKey"), cm);
       if (nf !== spend.nf1 && nf !== spend.nf2) {
         throw fail(`its nullifier is not one ${spent} spent`);
       }

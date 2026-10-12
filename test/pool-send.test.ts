@@ -34,7 +34,7 @@ import {
 // The expected limits come from the wallet defaults in gas.ts, never from the client's frame
 // builder, so a limit the client overrides cannot follow itself into the expectation.
 import * as gas from "../src/gas.ts";
-import { PRECOMPILES, UNCLAIMABLE_RECIPIENTS } from "../src/protocol.ts";
+import { MAX_TREES, PRECOMPILES, UNCLAIMABLE_RECIPIENTS } from "../src/protocol.ts";
 import { poolNode, type PoolNode } from "../src/rpc.ts";
 import { buildAndSend, spendVerdict, type Simulation, type TailKind } from "../src/send.ts";
 import {
@@ -56,7 +56,8 @@ const OWNER: FrameSig = {
 };
 const ACTION_GAS = 300_000n;
 const SETTLE_SIGNATURE =
-  "settle((bytes32,uint64,uint64,bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,address,address))";
+  "settle((bytes32,uint64,uint64,bytes32,bytes32,bytes32,bytes32,bytes32,uint256,uint256,address," +
+  "address,uint64,uint256,uint256,bytes32[20]))";
 const SETTLE = keccak(Buffer.from(SETTLE_SIGNATURE)).subarray(0, 4);
 
 /**
@@ -65,7 +66,9 @@ const SETTLE = keccak(Buffer.from(SETTLE_SIGNATURE)).subarray(0, 4);
  */
 function settlement(publicAmount = 0n, recipient = 0n, notes = new Uint8Array(96).fill(0x5a)) {
   const words = [1n, 1n, 0n, 2n, 3n, 4n, 5n, 6n, publicAmount, 7n, recipient, 8n];
-  return concat(SETTLE, ...words.map(word), notes);
+  // count, packedRanks and depth of a one-tree frontier, then its roots.
+  const frontier = [1n, 0n, 1n, 9n, ...Array<bigint>(MAX_TREES - 1).fill(0n)];
+  return concat(SETTLE, ...words.map(word), ...frontier.map(word), notes);
 }
 
 const frame = (
@@ -244,21 +247,22 @@ describe("transaction resource limits", () => {
   const withAction = (change: Partial<Action> = {}) =>
     spendTx(spendTailFrame(POOL, settlement(), { ...ACTION, ...change }) as Frame);
 
-  // Computed by the Python client (test_gas_only_action._spend_tx at commit 2386147).
+  // Computed by the Python client (test_gas_only_action._spend_tx at commit 2386147), and re-pinned
+  // when skew-mmr-v1 added the frontier to the settlement.
   test("a modest action fits, and its encoding and gas match the pinned values", () => {
     const tx = withAction();
     checkTxResourceLimits(tx);
     assert.equal(
       createHash("sha256").update(rawTx(tx)).digest("hex"),
-      "f8d9bf393e6b5cc1ce9656d4dd5db47e69899804d397f4e29bae294d79a9377d",
+      "3a5103a42609cbc4ea5419d796a38ba6562391735d023ef69dc77307bb375e84",
     );
     assert.equal(
       toHex(sigHash(tx)),
-      "0xce7bf7c77ba6b60340864c3f2ae4aecb79d9f46e0d86f36c1c0eb2708d38247e",
+      "0x660c87815f567a2e533226e02518f42bf4e4f0f027ed341253743f9552ebc7d1",
     );
     assert.deepEqual(
       [executionCapUsage(tx), totalGasLimit(tx), calldataFloorGas(tx), stateGasLimit(tx)],
-      [2_554_824n, 3_300_664n, 76_412n, 745_840n],
+      [2_557_804n, 3_303_644n, 123_516n, 745_840n],
     );
   });
 

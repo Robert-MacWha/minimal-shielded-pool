@@ -247,9 +247,13 @@ export class Scanner {
     if (leaf === undefined || this.notes.has(placeOf(leaf))) return null;
     const { epoch, index } = leaf;
     const domain = protocol.domainScalar(this.chainId, this.pool, epoch);
-    const nullifier = protocol.nullifier(domain, this.keys.nk, cm, index);
+    const nullifier = protocol.nullifier(domain, this.keys.nk, cm);
     const { kind } = incoming;
-    const record = this.#record({ cm, epoch, index, value, rho, nullifier, spent: false, kind });
+    // A later copy of a commitment in its epoch shares the first one's nullifier, so only one
+    // of them can be spent, and the copy is not counted.
+    const record = this.#nullifiers.has(nullifier)
+      ? null
+      : this.#record({ cm, epoch, index, value, rho, nullifier, spent: false, kind });
     if (noteIndex + 1n > incoming.nextIndex) {
       const watched = incoming.nextIndex + BigInt(LOOKAHEAD);
       incoming.nextIndex = noteIndex + 1n;

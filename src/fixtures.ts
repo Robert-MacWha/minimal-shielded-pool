@@ -188,17 +188,19 @@ export function spendEntry(
 ) {
   const { epoch, authorizer, owner, publicAmount = 0n, fee = 0n, recipient = 0n } = terms;
   const root = tree.root();
+  const { count, packedRanks, depth, frontier } = protocol.frontierFields(tree.frontier());
   const [nf1, nf2] = protocol.inputNullifiers(domain, owner.root, inputs);
   const [outCm1, outCm2] = protocol.outputCommitments(outputs);
-  // The crux: the proof's public signals compress exactly the wallet's own eleven statement
-  // values, recomputed here as the pool recomputes them.
-  const hashes = { nf1, nf2, outCm1, outCm2, root, domain };
+  // The crux: the proof's public signals compress exactly the wallet's own statement values,
+  // recomputed here as the pool recomputes them.
+  const hashes = { nf1, nf2, outCm1, outCm2, domain };
   const values = { publicAmount, fee, recipient, authorizer, owner: owner.address };
-  const stmt = protocol.statement({ ...hashes, ...values });
+  const mmr = { packedRanks, depth, frontier };
+  const stmt = protocol.statement({ ...hashes, ...values, ...mmr });
   const [beta, gamma, alpha] = publics;
   const { compressionAlpha, compressionBeta, fingerprint, P } = protocol;
   assert(alpha === compressionAlpha(stmt), "proof alpha does not hash the wallet's statement");
-  assert(beta === compressionBeta(stmt), "proof beta is not Poseidon of the wallet's statement");
+  assert(beta === compressionBeta(stmt), "proof beta does not digest the wallet's statement");
   const sigma = (alpha + beta) % P;
   assert(
     gamma === fingerprint(sigma, stmt),
@@ -221,6 +223,10 @@ export function spendEntry(
     fee: String(fee),
     recipient: hexPadded(recipient, 40),
     authorizer: hexPadded(authorizer, 40),
+    count: String(count),
+    packed_ranks: String(packedRanks),
+    depth: String(depth),
+    frontier: frontier.map(hex32),
     authorizer_private_key: toHex(terms.authorizerKey),
     owner: hexPadded(owner.address, 40),
     owner_leaf: owner.index,

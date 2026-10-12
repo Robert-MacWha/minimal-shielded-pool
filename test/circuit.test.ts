@@ -1,10 +1,10 @@
 /**
- * The occurrence nullifier circuit, with real witnesses against the committed artifacts and one
- * real Groth16 proof: duplicates of one commitment at different positions get distinct
- * nullifiers, the committed R1CS (not only the WASM's runtime asserts) rejects every broken
- * witness, including an owner outside the owner set, an empty leaf as the owner, and a
- * non-boolean path bit that would place any address under the set's root, beta and gamma are
- * constrained, assertUnprovable (the smoke generator's soundness
+ * The spend circuit, with real witnesses against the committed artifacts and one real Groth16
+ * proof: duplicates of one commitment at different positions share a nullifier, the committed
+ * R1CS (not only the WASM's runtime asserts) rejects every broken witness, including an owner
+ * outside the owner set, an empty leaf as the owner, and a non-boolean path bit that would place
+ * any address under the set's root, beta and gamma are constrained, assertUnprovable (the smoke
+ * generator's soundness
  * gate) counts only an in-circuit assertion as a refusal, verify() accepts the call the pool
  * probes a deployed verifier with, and it refuses every mutated statement value and the
  * out-of-field words and signals that snarkjs alone would accept. The consumed-key registry and
@@ -36,6 +36,7 @@ import type { ProofWords } from "../src/prover.ts";
 import * as pr from "../src/protocol.ts";
 import { seededRng } from "../src/random.ts";
 import {
+  OwnerTree,
   Tree,
   buildWitness,
   dummyInput,
@@ -58,6 +59,9 @@ const quiet = { debug() {}, info() {}, warn() {}, error() {} };
 const path = (relative: string) => fileURLToPath(new URL(`../${relative}`, import.meta.url));
 const ROOT = path("");
 const CIRCUIT = path("core/circuits/spend.circom");
+// The MMR membership gadget spend.circom includes from @skew-mmr/circuits.
+const GADGET_INCLUDE = 'include "@skew-mmr/circuits/inclusion.circom";\n';
+const GADGET = path("node_modules/@skew-mmr/circuits/inclusion.circom");
 const R1CS = path("core/artifacts/spend.r1cs");
 const CIRCOM = path("node_modules/.bin/circom2");
 
@@ -66,7 +70,7 @@ const Q = 0x30644e72e131a029b85045b68181585d97816a916871ca8d3c208c16d87cfd47n;
 
 const word = (x: bigint) => x.toString(16).padStart(64, "0");
 
-/** The pool's alpha, computed here: keccak256 of the eleven 32-byte big-endian words, mod P. */
+/** The pool's alpha, computed here: keccak256 of the 32-byte big-endian words, mod P. */
 function keccakAlpha(stmt: readonly bigint[]): bigint {
   const hash = keccak_256(Buffer.from(stmt.map(word).join(""), "hex"));
   return BigInt("0x" + Buffer.from(hash).toString("hex")) % pr.P;
@@ -94,10 +98,13 @@ let work = "";
 // breaks only them; mapped by signal name onto the committed wire layout (the optimizer
 // merges signals differently once constraints are removed), the committed R1CS must reject
 // it. Each range check gets its own variant so its case stays isolated from the other ranges.
+// The path bits are checked in @skew-mmr/circuits' gadget, so every variant inlines a copy of it
+// in place of the include (circom2 cannot include a file outside its working directory), and the
+// unchecked variant's copy drops GADGET_UNCHECKED.
 const UNCHECKED = [
   "    in_value[0] + in_value[1] === out_value[0] + out_value[1] + public_amount + fee;\n",
   "        bits[i] * (bits[i] - 1) === 0;\n",
-  "    (path.root - root) * value === 0;\n",
+  "    (1 - member.valid) * value === 0;\n",
   "    ownerPath.root === owner_root;\n",
   "    ownerIsZero.out === 0;\n",
   "            (out_inner[k] - SINK_INNER_0) * outIsZero[k].out === 0;\n",
@@ -110,6 +117,7 @@ const UNCHECKED = [
   "    authorizerIsZero.out === 0;\n",
   "    publicIsZero.out === recipientIsZero.out;\n",
 ];
+const GADGET_UNCHECKED = ["    right * (right - 1) === 0;\n"];
 const RANGE = "        rc[k].in <== vals[k];\n";
 // The wide variant decomposes every amount and both addresses into 254 bits. Below each check's
 // width the low bits are the committed ones, so an honest witness still holds, while a value at
@@ -132,6 +140,16 @@ const WIDE = [
 const VARIANTS = ["unchecked", "range-2", "range-3", "range-5", "wide"] as const;
 type Variant = (typeof VARIANTS)[number];
 
+/** The variant's gadget without its pragma; every line it drops must occur exactly once in it. */
+function variantGadget(variant: Variant): string {
+  let source = readFileSync(GADGET, "utf8").replace(/^pragma .*\n/m, "");
+  for (const line of variant === "unchecked" ? GADGET_UNCHECKED : []) {
+    assert.equal(source.split(line).length, 2, line);
+    source = source.replace(line, "");
+  }
+  return source;
+}
+
 /** The variant's source; every line it edits must occur exactly once in the circuit. */
 function variantSource(variant: Variant): string {
   const k = variant.slice("range-".length);
@@ -142,7 +160,7 @@ function variantSource(variant: Variant): string {
         ? WIDE
         : [[RANGE, `        if (k == ${k}) { rc[k].in <== 0; } else { rc[k].in <== vals[k]; }\n`]];
   let source = readFileSync(CIRCUIT, "utf8");
-  for (const [line, replacement] of edits) {
+  for (const [line, replacement] of [...edits, [GADGET_INCLUDE, variantGadget(variant)]]) {
     assert.equal(source.split(line).length, 2, line);
     source = source.replace(line, replacement);
   }
@@ -244,20 +262,22 @@ async function onCommittedWires(variant: Variant, witness: Witness, label: strin
   return patched(label, await template(), placed);
 }
 
-/** The eleven statement values a witness should prove, given the nullifiers it should compute. */
+/** The statement values a witness should prove, given the nullifiers it should compute. */
 function statementFor(w: Witness, [nf1, nf2]: readonly bigint[]): bigint[] {
   const outputs = w.out_inner.map((out, k): pr.Output => [BigInt(out), BigInt(w.out_value[k])]);
   const [outCm1, outCm2] = pr.outputCommitments(outputs);
-  const [root, domain, publicAmount, fee] = [w.root, w.domain, w.public_amount, w.fee].map(BigInt);
+  const [domain, publicAmount, fee] = [w.domain, w.public_amount, w.fee].map(BigInt);
   const [recipient, authorizer, owner] = [w.recipient, w.authorizer, w.owner].map(BigInt);
-  const terms = { root, domain, publicAmount, fee, recipient, authorizer, owner };
-  return pr.statement({ nf1, nf2, outCm1, outCm2, ...terms });
+  const [packedRanks, depth] = [w.packed_ranks, w.depth].map(BigInt);
+  const terms = { domain, publicAmount, fee, recipient, authorizer, owner };
+  const mmr = { packedRanks, depth, frontier: w.roots.map(BigInt) };
+  return pr.statement({ nf1, nf2, outCm1, outCm2, ...terms, ...mmr });
 }
 
 /**
  * The committed WASM computes the witness and the committed R1CS accepts it. The statement is
  * private: beta and gamma (wires 1 and 2, then alpha) match the expected statement only if the
- * circuit computed exactly these eleven values, which binds its nullifiers to the expected ones.
+ * circuit computed exactly these values, which binds its nullifiers to the expected ones.
  */
 async function accepted(name: string, witness: Witness, expected: readonly bigint[]) {
   const wtns = await calculate(name, witness);
@@ -304,6 +324,9 @@ const later = treeOf([...tree.leaves, pr.commitment(...newNote(rng), 29n)]);
 // A reorg can change the insertion order of the same two deposits.
 const otherCm = pr.commitment(...newNote(rng), 37n);
 const [branchA, branchB] = [treeOf([cm, otherCm]), treeOf([otherCm, cm])];
+// The third append merges the first two notes, so the note at index 0 has otherCm beside it. In
+// `tree` its sibling is its own copy, so the other branch opens the copy and the same nullifier.
+const merged = treeOf([cm, otherCm, cm]);
 const transferOutputs = [60n, 40n].map((value): pr.Output => [pr.inner(...newNote(rng)), value]);
 // Two funded inputs of 2^128 - 1 and 1, and an output that takes all but 1 of them.
 const max = (1n << 128n) - 1n;
@@ -328,7 +351,7 @@ function spend(
 
 const [first, firstStmt] = spend([real, dummy]);
 const [second, secondStmt] = spend([duplicate, dummy]);
-const [pair, pairStmt] = spend([real, duplicate]);
+const [pair] = spend([real, duplicate]);
 // The same input epoch, commitment and position on a later root; the publication slot is
 // intentionally absent.
 const [laterFirst, laterStmt] = spend([real, dummy], later);
@@ -339,9 +362,6 @@ const [otherEpoch, otherEpochStmt] = spend([real, dummy], later, domain1);
 // spends it at that index, which is `duplicate`'s opening, before reproving.
 const [rebuilt, rebuiltStmt] = spend([duplicate, dummy], branchB);
 const [dummyPair, dummyStmt] = spend([real, { nk, rho, value: 0n, idx: null }], later);
-const atMax = edited(dummyPair, (w) => (w.in_bits[1] = Array(pr.DEPTH).fill("1")));
-const maxNf = pr.nullifier(domain0, nk, noteCm(nk, rho, 0n), (1n << BigInt(pr.DEPTH)) - 1n);
-const atMaxStmt = statementFor(atMax, [dummyStmt[0], maxNf]);
 // Any leaf of the owner set may sign; leaf 2 takes the other branch at height 1.
 const [lastOwner, lastOwnerStmt] = spend([real, dummy], tree, domain0, OWNERS.leaf(2));
 
@@ -463,50 +483,75 @@ test("assertUnprovable counts only an in-circuit assertion as a refusal", async 
 const ACCEPTED: Record<string, [Witness, bigint[]]> = {
   "first-occurrence": [first, firstStmt],
   "identical-second-occurrence": [second, secondStmt],
-  "both-identical-funded-occurrences": [pair, pairStmt],
   "same-occurrence-later-root": [laterFirst, laterStmt],
   "same-position-other-authenticated-epoch": [otherEpoch, otherEpochStmt],
   "reorg-rebuilt-tree-and-index": [rebuilt, rebuiltStmt],
   "dummy-same-secret-and-position": [dummyPair, dummyStmt],
-  "dummy-arbitrary-maximum-position": [atMax, atMaxStmt],
   "another-owner-of-the-set": [lastOwner, lastOwnerStmt],
 };
 for (const [name, [witness, stmt]] of Object.entries(ACCEPTED)) {
   test(name, () => accepted(name, witness, stmt));
 }
 
-test("the accepted cases' nullifiers follow the position and epoch, not the root", () => {
-  // statement[0] and [1] are the nullifiers, and statement[4] the root.
-  assert.notEqual(secondStmt[0], firstStmt[0], "identical-second-occurrence");
-  const both = [firstStmt[0], secondStmt[0]];
-  assert.deepEqual(pairStmt.slice(0, 2), both, "both-identical-funded-occurrences");
-  assert.notEqual(laterStmt[4], firstStmt[4], "same-occurrence-later-root: root");
+test("every note opens at its index, through every merge", async () => {
+  // Every note of a 40-note MMR, whose trees reach rank 3 and whose appends merge and push in
+  // turn, opens against the frontier with the nullifier of its commitment.
+  const own = seededRng(20261011n);
+  const notes = Array.from({ length: 40 }, (_, i): pr.SpendInput => {
+    const [nk, rho] = newNote(own);
+    return { nk, rho, value: BigInt(i + 1), idx: BigInt(i) };
+  });
+  const mmr = treeOf(notes.map((n) => noteCm(n.nk, n.rho, n.value)));
+  for (const note of notes) {
+    const [witness, stmt] = spend([note, dummy], mmr);
+    const [, beta] = await snarkjs.wtns.exportJson(await calculate(`index-${note.idx}`, witness));
+    assert.equal(beta, pr.compressionBeta(stmt), `index ${note.idx}`);
+  }
+});
+
+test("the accepted cases' nullifiers follow the commitment and epoch, not the position", () => {
+  // statement[0] and [1] are the nullifiers, and statement[10] on the frontier.
+  assert.equal(secondStmt[0], firstStmt[0], "identical-second-occurrence");
+  assert.notDeepEqual(laterStmt.slice(10), firstStmt.slice(10), "same-occurrence-later-root: root");
   assert.deepEqual(laterStmt.slice(0, 2), firstStmt.slice(0, 2), "same-occurrence-later-root");
   assert.notEqual(otherEpochStmt[0], laterStmt[0], "same-position-other-authenticated-epoch");
-  assert.notEqual(rebuiltStmt[0], firstStmt[0], "reorg-rebuilt-tree-and-index");
+  assert.equal(rebuiltStmt[0], firstStmt[0], "reorg-rebuilt-tree-and-index");
   assert.notEqual(dummyStmt[0], dummyStmt[1], "dummy-same-secret-and-position");
-  assert.notEqual(atMaxStmt[1], laterStmt[0], "dummy-arbitrary-maximum-position");
 });
 
 type Rejected = [name: string, witness: Witness, variant?: Variant];
 const REJECTED: Rejected[] = [
   ["same-occurrence-twice", twice],
+  // Two insertions of one commitment share a nullifier, so they cannot be spent together.
+  ["both-identical-funded-occurrences", pair],
   [
     "same-output-twice-in-one-spend",
-    edited(pair, (w) => {
+    edited(wide, (w) => {
       w.out_inner = Array(2).fill(String(pr.inner(pr.ownerPk(OWNERS.root, nk), rho)));
-      w.out_value = ["100", "100"];
+      w.out_value = Array(2).fill(String(1n << 127n));
       w.public_amount = "0";
       w.recipient = "0";
     }),
   ],
   // Selects a different branch of the same tree.
-  ["forged-real-position", edited(first, (w) => (w.in_bits[0][1] = "1"))],
-  ["nonboolean-path-bit", edited(first, (w) => (w.in_bits[0][0] = "2"))],
-  ["incorrect-root", edited(first, (w) => (w.root = String(mod(BigInt(w.root) + 1n, pr.P))))],
+  [
+    "forged-real-position",
+    edited(spend([real, dummy], merged)[0], (w) => (w.in_path_right[0][0] = "0")),
+  ],
+  ["nonboolean-path-bit", edited(first, (w) => (w.in_path_right[0][0] = "2"))],
+  // Opens a tree above the frontier's depth, whose root and rank are zero.
+  ["tree-above-the-frontier", edited(first, (w) => (w.in_tree[0] = w.depth))],
+  [
+    "incorrect-root",
+    edited(first, (w) => (w.roots[0] = String(mod(BigInt(w.roots[0]) + 1n, pr.P)))),
+  ],
   [
     "reorg-stale-membership-path",
-    edited(spend([real, dummy], branchA)[0], (w) => (w.root = String(branchB.root()))),
+    edited(spend([real, dummy], branchA)[0], (w) => {
+      const { packedRanks, depth, frontier } = pr.frontierFields(branchB.frontier());
+      Object.assign(w, { roots: frontier.map(String), packed_ranks: String(packedRanks) });
+      w.depth = String(depth);
+    }),
   ],
   // Each witness below breaks exactly one constraint, so deleting or weakening that constraint
   // alone would let it through.
@@ -518,11 +563,11 @@ const REJECTED: Rejected[] = [
     edited(first, (w) => Object.assign(w, { public_amount: "101", fee: String(pr.P - 1n) })),
     "range-5",
   ],
-  // A dummy's membership is gated off by its zero value, so a non-boolean path bit there
-  // breaks only the booleanity constraint, at any depth.
-  ...[0, 10, 19].map((d): Rejected => [
+  // A dummy opens no path, so a non-boolean path bit there breaks only the booleanity
+  // constraint, at any step.
+  ...[0, 9, pr.MAX_TREES - 2].map((d): Rejected => [
     `nonboolean-dummy-path-bit-${d}`,
-    edited(first, (w) => (w.in_bits[1][d] = "2")),
+    edited(first, (w) => (w.in_path_right[1][d] = "2")),
   ]),
   ...[0, 1].map((k): Rejected => [
     `zero-output-${k}-without-its-sink`,
@@ -611,13 +656,10 @@ for (const [name, witness, variant = "unchecked"] of REJECTED) {
   test(name, () => rejected(name, witness, variant));
 }
 
-test("reference-canonical-epoch-and-index-bounds", () => {
-  // The helpers' ranges must agree with the dispatcher's uint64 epochs and depth-20 indices.
+test("reference-canonical-epoch-bounds", () => {
+  // The helper's range must agree with the dispatcher's uint64 epochs.
   for (const epoch of [-1n, 1n << 64n]) {
     assert.throws(() => pr.domainScalar(31337n, pool, epoch), InputError, `epoch ${epoch}`);
-  }
-  for (const index of [-1n, 1n << BigInt(pr.DEPTH)]) {
-    assert.throws(() => pr.nullifier(domain0, nk, cm, index), InputError, `index ${index}`);
   }
 });
 
@@ -629,8 +671,10 @@ test("r1cs-rejects-forged-beta-and-gamma", async () => {
   const wires = await committedWires();
   const forgedBeta = mod(beta + 1n, pr.P);
   const sigma = mod(alpha + forgedBeta, pr.P);
-  const acc = [firstStmt[10]];
-  for (let i = 9; i >= 0; i--) acc.unshift(mod(acc[0] * sigma + firstStmt[i], pr.P));
+  const acc = [firstStmt[firstStmt.length - 1]];
+  for (let i = firstStmt.length - 2; i >= 0; i--) {
+    acc.unshift(mod(acc[0] * sigma + firstStmt[i], pr.P));
+  }
   const forged = new Map<number, bigint>().set(1, forgedBeta).set(2, acc[0]);
   const named = new Map([["main.sigma", sigma]]);
   acc.forEach((a, i) => named.set(`main.acc[${i}]`, a));
@@ -668,7 +712,7 @@ test("real-groth16-proof", async () => {
   type Refused = [label: string, signals: bigint[], words: typeof proof];
   const refused: Refused[] = [
     ...firstStmt.map((x, i): Refused => {
-      const stmt = firstStmt.with(i, i === 5 ? domain1 : mod(x + 1n, pr.P));
+      const stmt = firstStmt.with(i, i === 4 ? domain1 : mod(x + 1n, pr.P));
       return [`statement[${i}]`, settled(stmt), proof];
     }),
     ["beta", [mod(beta + 1n, pr.P), gamma, alpha], proof],
@@ -704,8 +748,8 @@ test("the pool's reference verifier call verifies, and its changed copy does not
 });
 
 /** OWNERS' tree, for the path of an empty leaf, which OwnerSet does not hand out. */
-function treeOfOwners(): Tree {
-  const owners = new Tree(pr.OWNER_DEPTH);
+function treeOfOwners(): OwnerTree {
+  const owners = new OwnerTree(pr.OWNER_DEPTH);
   for (const address of OWNERS.addresses) owners.append(address);
   return owners;
 }

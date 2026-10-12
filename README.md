@@ -21,14 +21,15 @@ The code that guards the pool's funds is about 1,700 lines in `core/`:
   nonce keys, the authorizer's and the owner's signatures, the proof and that
   the fee covers the maximum cost. It passes every other call to the logic.
 - `core/contracts/src/ShieldedPoolLogic.sol`: the pool's state. Shields and
-  settlement append notes to the tree, settlement records withdrawal credits
+  settlement append notes to the tree, a skew-MMR kept by
+  `@skew-mmr/contracts`' `LibSkewMmr`, settlement records withdrawal credits
   that `claimWithdrawal` pays out, and `publishEpochRoot` publishes roots to
   EIP-8272.
 - `core/contracts/src/Groth16Verifier.sol`: the verifier snarkjs generated for
   the setup's verification key, hardened by `tools/patch-verifier.ts`.
 - `core/contracts/src/PoseidonT3.sol` and `PoseidonT4.sol`: circomlib's
-  Poseidon with two and three inputs, which the logic calls for the tree and a
-  shield's commitment. `PoseidonBN254.sol` wraps them for the tests.
+  Poseidon with two and three inputs. The logic calls `PoseidonT4` for the tree
+  and a shield's commitment. `PoseidonBN254.sol` wraps them for the tests.
 
 Pool solvency, meaning that nobody can take out more than their own notes hold,
 rests on these files and the artifacts built from them, on the trusted setup
@@ -135,13 +136,14 @@ first, so a set allows 2^16 unlinked spends, and notes of two owner sets cannot
 be spent together.
 
 A spend proves a join-split with two inputs and two outputs. Its statement is
-eleven values: `[nf1, nf2, outCm1, outCm2, root, domain, publicAmount, fee,
-recipient, authorizer, owner]`. To save verification gas, the proof exposes
-three public signals instead, using the hybrid compression of
+32 values: `[nf1, nf2, outCm1, outCm2, domain, publicAmount, fee, recipient,
+authorizer, owner, packedRanks, depth]` and the 20 roots of the tree's
+frontier. To save verification gas, the proof exposes three public signals
+instead, using the hybrid compression of
 [eprint 2025/1500](https://eprint.iacr.org/2025/1500): the pool computes
-`alpha = keccak256(statement) mod r`, the circuit computes
-`beta = Poseidon(statement)`, and both evaluate `gamma`, the statement as a
-polynomial at `alpha + beta`. The first ten values stay public in the
+`alpha = keccak256(statement) mod r`, the circuit computes `beta` by chaining
+the statement through Poseidon of two, and both evaluate `gamma`, the statement
+as a polynomial at `alpha + beta`. All values but the owner stay public in the
 settlement data, and the pool takes the owner from the owner's signature. The
 pool recomputes `alpha` and `gamma` and range-checks each value itself, since
 the verifier no longer sees them. The circuit derives each nullifier from its
@@ -153,19 +155,20 @@ authorizer address, and a recipient exactly when `publicAmount` is positive. A
 zero-value output must use a fixed "sink" commitment for its position, which
 the pool never inserts.
 
-Every note is identified by its tree epoch and leaf index. The nullifier binds
-that position, so two notes with the same commitment are spent independently and no uniqueness registry is needed:
+The nullifier binds a note's epoch and commitment, so two insertions of the
+same commitment in one epoch can be spent only once between them. Wallets draw
+a fresh `rho` for every note, so commitments repeat only by mistake:
 
 ```text
 D  = keccak256(domain_tag || chain_id || pool || epoch) mod r
-nf = Poseidon3(4, Poseidon2(D, nk), Poseidon2(cm, leaf_index))
+nf = Poseidon3(4, Poseidon2(D, nk), cm)
 ```
 
 Here `domain_tag = keccak256("minimal-shielded-pool:occurrence-domain:v1")`,
 each field is 32 bytes and `r` is the BN254 scalar field order. The pool
 checks that `D` uses the epoch of the root the spend proves against, so each
-note has exactly one nullifier. Wallets must track notes
-by position and rebuild positions after a reorg.
+note has exactly one nullifier. Wallets still track where each note sits, to
+open it, and rebuild the tree after a reorg.
 
 ## Transactions
 
@@ -212,14 +215,14 @@ stands out.
 | Frame | Execution gas | State gas | Data |
 |---|---:|---:|---:|
 | Recent root | 8,000 default (uses 5,579) | 0 pinned | 72 bytes |
-| Proof | 225,000 default (uses about 211,000) | 195,840 default | 288 bytes |
-| Settlement | 2,000,000 pinned | 550,000 pinned | 484 or 1,572 bytes |
+| Proof | 225,000 default (uses about 218,000) | 195,840 default | 288 bytes |
+| Settlement | 2,000,000 pinned | 550,000 pinned | 1,220 or 2,308 bytes |
 
-The settlement frame's data is the 388-byte `settle(Spend)` call followed by
-96 note bytes, or 1,184 on a sender's first payment to a public address.
-The proof frame's data is the 256-byte proof followed by `beta`. It needs a
-limit of about 217,000, although it uses about 211,000, because each nested
-call keeps back 1/64 of its gas (EIP-150). Below
+The settlement frame's data is the 1,124-byte `settle(Spend)` call, the tree's
+frontier included, followed by 96 note bytes, or 1,184 on a sender's first
+payment to a public address. The proof frame's data is the 256-byte proof
+followed by `beta`. It needs a limit of 224,681, although it uses about
+218,000, because each nested call keeps back 1/64 of its gas (EIP-150). Below
 that, the verifier runs out of gas and the pool reports an invalid proof. The
 proof frame's state gas pays for creating the two nullifier keys.
 
@@ -258,8 +261,9 @@ An account called by the fourth frame sees EIP-8141's entry point as its caller,
 authenticate its own owner. This is a direct account call, not an ERC-4337
 adapter. See [SECURITY.md](SECURITY.md#the-fourth-frame).
 
-When the current tree lacks room for the notes being inserted, the pool starts
-a new epoch first, for shields and settlements alike. Sinks take no space, so a
+When the current tree lacks room for the notes being inserted (an epoch holds
+2^21 − 22), the pool starts a new epoch first, for shields and settlements
+alike. Sinks take no space, so a
 full tree never blocks a full withdrawal. `publishEpochRoot(epoch)` takes no
 root from its caller and reads the epoch's root from pool state, so anyone may
 publish the pool's current or final epoch root to EIP-8272. A failed
@@ -322,8 +326,8 @@ payments per channel past the last one it has seen final, since the recipient
 watches 20 indices ahead.
 
 The `notes` commands under [Use](#use) give a wallet its address, its notes and
-its direct secrets. `scan` and `direct-secret` need the config of an
-`owner-set-v1` pool; they refuse the `position-notes-v3` testnet deployment
+its direct secrets. `scan` and `direct-secret` need the config of a
+`skew-mmr-v1` pool; they refuse the `position-notes-v3` testnet deployment
 that `core/deploy_config.json` still records.
 
 `scan` reads finalized blocks only and keeps its state in an owner-only file.
@@ -455,7 +459,7 @@ through it with these commands.
 
 ## Deployment
 
-This is pool profile `owner-set-v1`. It follows EIP-8141 at
+This is pool profile `skew-mmr-v1`. It follows EIP-8141 at
 `7d1c8bfb94`, EIP-8250 at `f3079a09e8` and EIP-8272 at `824cbc0b0e`: an eight-field envelope
 with separate execution and state gas limits for each frame. Because the EIPs
 are drafts, each supported combination is a separate profile, and profiles are
@@ -465,8 +469,8 @@ byte for byte, with the earlier devnet runs and reviews, under the
 
 Each profile needs its own deployment, because a deployed pool cannot be
 upgraded. A `position-notes-v3` pool rejects this profile's spends, whose
-proofs follow the owner-set relation and which carry the owner's signature, and
-its notes use spend keys that no owner set opens. This profile has no
+proofs follow the owner-set relation over a skew-MMR and which carry the owner's
+signature and the tree's frontier, and its notes use spend keys that no owner set opens. This profile has no
 deployment yet: `core/deploy_config.json` still records the
 `position-notes-v3` testnet deployment, which the CLI refuses to spend from.
 
@@ -543,8 +547,7 @@ manifest marked `production: true`.
 
 The Forge tests in `core/contracts/test/` run the contracts with the committed
 verifier and Poseidon libraries. They check that settlement fits the 2,000,000
-gas pin through an epoch rollover and the longest carries (262,143 and 524,287
-leaves), full-tree exits, sink positions, root publication apart from
+gas pin through an epoch rollover and two merges in a row, full-tree exits, sink positions, root publication apart from
 settlement, a failed claim keeping its credit, a reentrant recipient paid once,
 the refusal of direct calls to the implementation, and that the verifier
 refuses non-canonical and infinity points and binds each statement value,
@@ -558,16 +561,18 @@ owner's signature, but not networking, other clients or FOCIL.
 A Lean formal verification of the `position-notes-v2` pool at `8835be7` lives in
 [verified-shielded-pool](https://github.com/soispoke/verified-shielded-pool),
 with its own CI. Its SPEC.md says which claims are proved and which are still
-open, and pins twelve files by hash. Of those, only the Poseidon libraries still
-match. The owner set changes the relation: the circuit, its R1CS, the proving
-and verification keys, the verifier and the dispatcher, which checks the owner's
-signature, all differ in what they do. For note delivery, the dispatcher also
-admits settlement frame data of 484 or 1,572 bytes instead of exactly 388, and
-shield and settlement check the length of the notes they carry and emit them.
-The dispatcher initcode, `foundry.toml` and the activation manifest differ too.
-The proofs do not cover these changes. The formal repository is checked out as
-`formal/` inside a pool checkout, which git ignores here. CI's `formal-pins` job
-lists every pinned file that differs, as warnings that do not fail the build
+open, and pins twelve files by hash. Of those, only the Poseidon libraries
+still match. The owner set and then the skew-MMR changed the relation: the
+circuit, its R1CS, the proving and verification keys, the verifier and the
+dispatcher, which checks the owner's signature and opens the tree's frontier,
+all differ in what they do. For note delivery, the dispatcher also admits
+settlement frame data of 484 or 1,572 bytes instead of exactly 388, and shield
+and settlement check the length of the notes they carry and emit them; the
+skew-MMR changed both the logic and these lengths again. The dispatcher
+initcode, `foundry.toml` and the activation manifest differ too. The proofs do
+not cover these changes. The formal repository is checked out as `formal/`
+inside a pool checkout, which git ignores here. CI's `formal-pins` job lists
+every pinned file that differs, as warnings that do not fail the build
 (`node tools/check-formal-pins.ts`, or `just formal-pins`).
 
 See [SECURITY.md](SECURITY.md) for trust and failure boundaries.
