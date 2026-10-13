@@ -840,6 +840,24 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   );
   const otherKey = refused("signature-other-key", initial, undefined, { raw: rawTx(other) });
   addCase("signature-by-another-key-rejected", [otherKey]);
+  // The dispatcher takes the authorizer's signature only when SIGPARAM reports its msg as 0,
+  // which EIP-8141 reserves for the transaction hash by making an explicit zero msg invalid. A
+  // client that admitted one would let the authorizer's signature over that fixed digest pass
+  // as one over the transaction, here with another fourth frame, so the protocol must refuse it
+  // before any frame runs.
+  const zeroMsg = frameTx(initial, { mutate: setTail });
+  const zero = new Uint8Array(32);
+  const authorizer = fromHex(initial.authorizer_private_key, "authorizer key");
+  zeroMsg.signatures[0] = {
+    ...zeroMsg.signatures[0],
+    msg: zero,
+    signature: signHash(zero, authorizer),
+  };
+  const zeroStep = refused("signature-zero-message", initial, undefined, {
+    raw: rawTx(zeroMsg),
+    error: "explicit msg must not be zero digest",
+  });
+  addCase("signature-explicit-zero-message-rejected", [zeroStep]);
 
   // The owner's signature. Each case changes only the signatures of a valid spend, so the pool
   // must refuse it in VERIFY frame 1, before approval. A spend without the owner's signature,

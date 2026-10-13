@@ -37,7 +37,7 @@ key is test-only. The vectors themselves are ignored by Git. The two reports,
 `native-report.json` and `policy-report.json`, are tracked, so a run changes
 them by design.
 
-The recorded run passes 86 native scenarios and two client-policy tests, using
+The recorded run passes 87 native scenarios and two client-policy tests, using
 34 real Groth16 proofs. The highest measured settlement execution cost is
 1,435,539 gas (long carry plus withdrawal credit, with a first payment's
 notes). The conservative five-slot state test uses 489,600 state gas, below the
@@ -138,6 +138,13 @@ revert in settlement at the pool's expense. The pool refuses each in its
 scenarios fail. Deleting the settlement execution pin stops the fixture
 generator itself, because the old-limit regression patches that literal, so no
 scenario runs.
+
+One scenario covers a rule of EIP-8141 that the dispatcher relies on instead of
+a check of its own: the authorizer signs an explicit all-zero `msg`, beside
+another fourth frame. `SIGPARAM` would report that `msg` as 0, as for a
+signature over the transaction hash, so the protocol must refuse the
+transaction before any frame runs; the pinned ethrex does, with state
+unchanged.
 
 Two more scenarios cover checks that back each other up, so each survives
 deleting one of them and fails only when both go. A recent-root frame in
