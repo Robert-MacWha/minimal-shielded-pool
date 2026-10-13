@@ -38,9 +38,13 @@
  *
  * An address's owner key commits to its device's owner set and to a nullifier key nk the seed
  * derives (protocol.ownerPk), so the seed finds and proves the address's notes, but only the
- * device can authorize their spends. All notes paid to one address share its nk. A disclosure
- * receipt for one of them reveals Poseidon2(D, nk), which identifies every spend of that address
- * in epoch D, so src/disclosure.ts refuses such a receipt unless asked for it explicitly.
+ * device can authorize their spends. Every secret of an address, nk and its ML-KEM key included,
+ * comes from root = PRF(seed, "account", account, owner set's root). An address under another
+ * owner set therefore shares no secret with it: a scan of one cannot see the direct numbers and
+ * change indices the other used, so shared secrets would go to a second sender or repeat a key.
+ * All notes paid to one address share its nk. A disclosure receipt for one of them reveals
+ * Poseidon2(D, nk), which identifies every spend of that address in epoch D, so src/disclosure.ts
+ * refuses such a receipt unless asked for it explicitly.
  */
 import * as crypto from "node:crypto";
 
@@ -239,8 +243,8 @@ export class Address {
 }
 
 /**
- * One address's keys: its secrets, derived from the wallet seed, and the root of the owner set
- * whose device authorizes its spends.
+ * One address's keys: its secrets, derived from the wallet seed, the account number and the root
+ * of the owner set whose device authorizes its spends.
  */
 export class WalletKeys {
   readonly account: bigint;
@@ -260,7 +264,7 @@ export class WalletKeys {
     }
     if (account < 0n) throw new NotesError("an account number is nonnegative");
     this.account = account;
-    this.root = prf(seed, "account", account);
+    this.root = prf(seed, "account", account, ownerRoot);
     this.ownerRoot = ownerRoot;
     this.nk = prfField(this.root, "nullifier");
     if (this.nk === 0n) throw new NotesError("degenerate nullifier key");

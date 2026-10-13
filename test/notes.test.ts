@@ -248,11 +248,16 @@ test("keys and addresses: derived from the seed, owner set and account, and chec
   const second = keysOf("alice", 1n);
   assert.notEqual(second.address().hex(), ALICE.address().hex());
   assert.notEqual(second.nk, ALICE.nk);
-  // Another owner set makes another owner key, with the same secrets.
+  // Another owner set, with the same seed and account, makes a wallet that shares no secret: its
+  // scan cannot see the direct numbers or change indices the first one used, so a shared secret
+  // would go to a second sender or repeat a note key, and a shared ML-KEM key would link the
+  // two addresses.
   const moved = new n.WalletKeys(seedOf("alice"), ownerRootOf("bob"));
   assert.notEqual(moved.ownerPk, ALICE.ownerPk);
-  assert.equal(moved.nk, ALICE.nk);
-  assert.deepEqual(moved.selfSecret, ALICE.selfSecret);
+  assert.notEqual(moved.nk, ALICE.nk);
+  assert.notDeepEqual(moved.selfSecret, ALICE.selfSecret);
+  assert.notDeepEqual(moved.directSecret(0n), ALICE.directSecret(0n));
+  assert.notDeepEqual(moved.address().ek, ALICE.address().ek);
   assert.equal(n.Address.decode(ALICE.address().hex()).hex(), ALICE.address().hex());
   assert.equal(ALICE.address().encode().length, 1217);
   assert.equal(n.ADDRESS_BYTES, 1217);
