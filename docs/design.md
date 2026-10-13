@@ -28,8 +28,9 @@ dispatcher (`core/dispatcher/ShieldedPoolDispatcher.yul`) is written in Yul
 with `verbatim`. It checks the frame layout, the nonce keys, the recent-root
 tuple, and the transaction's two signatures: the first from the proof's
 one-time `authorizer` over the whole transaction, the second from the owner
-over the spend's intent. It calls the verifier directly, because ethrex forbids
-a delegatecall inside a VERIFY frame, and then approves. Every other call is
+over the spend's intent. It calls the verifier directly rather than through the
+logic, which an earlier ethrex mempool policy required and which keeps the
+logic's code out of validation, and then approves. Every other call is
 delegatecalled to `ShieldedPoolLogic`, which shares the dispatcher's storage
 and refuses direct state-changing calls.
 

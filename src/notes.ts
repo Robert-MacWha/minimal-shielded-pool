@@ -39,12 +39,13 @@
  * An address's owner key commits to its device's owner set and to a nullifier key nk the seed
  * derives (protocol.ownerPk), so the seed finds and proves the address's notes, but only the
  * device can authorize their spends. Every secret of an address, nk and its ML-KEM key included,
- * comes from root = PRF(seed, "account", account, owner set's root). An address under another
- * owner set therefore shares no secret with it: a scan of one cannot see the direct numbers and
- * change indices the other used, so shared secrets would go to a second sender or repeat a key.
- * All notes paid to one address share its nk. A disclosure receipt for one of them reveals
- * Poseidon2(D, nk), which identifies every spend of that address in epoch D, so src/disclosure.ts
- * refuses such a receipt unless asked for it explicitly.
+ * comes from root = PRF(seed, "account", account, owner set's root). The owner set's root is in it
+ * because a scan under one owner set keeps its own state, which cannot see the direct numbers and
+ * change indices used under another: if two addresses shared secrets, a direct secret could go to
+ * a second sender and a change index could repeat a note key. All notes paid to one address share
+ * its nk. A disclosure receipt for one of them reveals Poseidon2(D, nk), which identifies every
+ * spend of that address in epoch D, so src/disclosure.ts refuses such a receipt unless asked for
+ * it explicitly.
  */
 import * as crypto from "node:crypto";
 

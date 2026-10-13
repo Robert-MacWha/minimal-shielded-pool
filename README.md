@@ -122,7 +122,8 @@ Poseidon2 hash.
 The owner is an owner set. `Q` is the root of a depth-16 Poseidon tree whose
 leaves are one-time secp256k1 addresses, with 0 in any unused leaf, and a
 signing device such as a hardware wallet holds their keys. `nk`, the nullifier
-key, comes from the wallet's seed. The wallet that proves holds `Q`, `nk` and
+key, and every note-delivery secret come from the wallet's seed, an account
+number and `Q`. The wallet that proves holds `Q`, `nk` and
 the set's addresses, which let it open and prove its notes and see when they are
 spent. Each spend reveals one address of the set, the owner, and carries the
 owner's signature over the spend (see [Transactions](#transactions)), so once
@@ -337,9 +338,12 @@ the highest one paid, which is how far a scan from the seed looks. History
 older than Ethereum's retention window (EIP-4444) comes from archives, as it
 already does for the tree leaves.
 
-A normal spend grows by 96 bytes and about 4,000 gas, and an inclusion list
-still holds four spends. A first payment to a public address grows by
-1,184 bytes and is visibly larger. See [SECURITY.md](SECURITY.md#privacy-limits).
+A normal spend grows by 96 bytes and about 4,000 gas. Four spends still fit
+EIP-8369's 2^20 validation budget for an inclusion list, but every spend has
+the pool as sender, so an includer that caps transactions per sender, as ethrex
+`247e2dd2` does at two by default, lists at most two. A first payment to a
+public address grows by 1,184 bytes and is visibly larger; an 8 KiB list holds
+three. See [SECURITY.md](SECURITY.md#privacy-limits).
 
 ## Disclosure receipts
 
@@ -407,10 +411,10 @@ node src/cli/pool.ts RPC CONFIG FIXTURE withdraw [--spend-key NAME] [--root-slot
 node src/cli/notes.ts address --owner-root ROOT [--account N] [--seed-file PATH]
 # Find the wallet's notes in finalized blocks and print the unspent ones.
 node src/cli/notes.ts scan --owner-root ROOT --config CONFIG --state PATH \
-  [--rpc URL] [--seed-file PATH]
+  [--rpc URL] [--account N] [--seed-file PATH]
 # Issue the next numbered secret, for one sender to receive out of band.
 node src/cli/notes.ts direct-secret --owner-root ROOT --config CONFIG \
-  --state PATH [--seed-file PATH]
+  --state PATH [--account N] [--seed-file PATH]
 
 # Write a receipt that discloses the named notes of a fixture.
 node src/cli/disclosure.ts export --rpc URL --config CONFIG --fixture FIXTURE \
@@ -426,19 +430,20 @@ node src/cli/nonce-race.ts --pool-address=0x... [--random] [--rpc=URL] [--output
 ```
 
 `ROOT` is the root of the wallet's owner set, which is public; a fixture records
-it for each wallet as `owner_root`. `--spend-key` takes the name of a fixture's
-spend entry, such as `withdraw_seed` or a nonce-race fixture's `transfer_c`,
-never a key.
-Every pool command accepts `--dry-run`, which signs the transaction and asks
-the RPC to simulate it without sending it.
+it for each wallet as `owner_root`. A seed has one address for each account
+number (`--account`, 0 by default) and owner set, so `scan` and `direct-secret`
+need the account and owner set the address was printed with. `--spend-key` takes
+the name of a fixture's spend entry, such as `withdraw_seed` or a nonce-race
+fixture's `transfer_c`, never a key. Every pool command accepts `--dry-run`,
+which signs the transaction and asks the RPC to simulate it without sending it.
 The RPC still sees the signed transaction and could broadcast it. A transfer or
 withdrawal without `--root-slot` uses the slot the config records for it. The
-four `--action-*` options replace a spend's fourth frame with a custom call
-(see [Transactions](#transactions)). A spend's proof fixes its `fee`, which must
+four `--action-*` options replace a spend's fourth frame with a custom call (see
+[Transactions](#transactions)). A spend's proof fixes its `fee`, which must
 cover the transaction's maximum cost. By default the fee cap per gas is twice
-the base fee plus a 1 gwei tip; on a transfer or withdrawal,
-`--max-fee-per-gas` and `--max-priority-fee-per-gas` set the cap and tip in
-wei, so a proof whose fee no longer covers the default cap can still be sent.
+the base fee plus a 1 gwei tip; on a transfer or withdrawal, `--max-fee-per-gas`
+and `--max-priority-fee-per-gas` set the cap and tip in wei, so a proof whose
+fee no longer covers the default cap can still be sent.
 
 With no options, `smoke.ts` rewrites the committed
 `test/fixtures/smoke_fixture.json` from a public fixed seed. Any other chain or

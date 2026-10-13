@@ -143,15 +143,15 @@ other nodes may lack it.
 
 ## Liveness
 
-Every spend has the pool as sender, so per-sender mempool limits apply to all
-users at once. EIP-8141's conservative rule keeps one pending frame transaction
-per sender; both ethrex revisions relax it for spends with disjoint nonce keys.
-`247e2dd2`'s MATCHA, on by default, charges each pending spend beyond the first
-to one width budget for the pool, at admission and again at every
-forkchoiceUpdated, and evicts spends it can no longer pay for. The budget
-refills only from the pool's finalized gas, so a few concurrent spends, or one
-note holder replacing a spend while another is pending, can delay everyone
-else's.
+Every spend has the pool as sender, so per-sender mempool limits, and per-sender
+caps on inclusion lists, apply to all users at once. EIP-8141's conservative
+rule keeps one pending frame transaction per sender; both ethrex revisions relax
+it for spends with disjoint nonce keys. `247e2dd2`'s MATCHA, on by default,
+charges each pending spend beyond the first to one width budget for the pool, at
+admission and again at every forkchoiceUpdated, and evicts spends it can no
+longer pay for. The budget refills only from the pool's finalized gas, so a few
+concurrent spends, or one note holder replacing a spend while another is
+pending, can delay everyone else's.
 
 Both revisions recheck every pending spend, its pairing check included, on each
 forkchoiceUpdated. A recheck takes an estimated 1.1 to 1.3 ms on fast hardware,

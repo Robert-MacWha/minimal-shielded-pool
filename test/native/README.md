@@ -113,7 +113,7 @@ makes exactly these seven fail.
 Nine scenarios cover the owner's signature. Seven change only the signatures
 of a valid withdrawal: no owner signature, the owner's signature twice, the
 owner's key signing another intent, the same intent for another pool, or the
-transaction hash, a key outside the owner set signing the right intent, and the
+transaction's signature hash, a key outside the owner set signing the right intent, and the
 owner signing first. One spends a note whose owner set holds a P-256 address,
 signed with P-256, which EIP-8141 validates but the pool refuses, so every
 spend has one shape. The pool refuses each in its `VERIFY` frame with state
@@ -141,8 +141,8 @@ scenario runs.
 
 One scenario covers a rule of EIP-8141 that the dispatcher relies on instead of
 a check of its own: the authorizer signs an explicit all-zero `msg`, beside
-another fourth frame. `SIGPARAM` would report that `msg` as 0, as for a
-signature over the transaction hash, so the protocol must refuse the
+another fourth frame. `SIGPARAM` would report that `msg` as 0, as for an
+empty `msg`, which covers `compute_sig_hash`, so the protocol must refuse the
 transaction before any frame runs; the pinned ethrex does, with state
 unchanged.
 
@@ -174,9 +174,10 @@ another revision, such as `bdfc5d8f`, generate them with
 `run.ts`, then run `cargo test` with a
 `Cargo.toml` made from `Cargo.toml.in` whose `@ETHREX@` names that source and
 with `ETHREX_SOURCE` set to it. The report names the revision it ran on, with
-`-dirty` if that source has local changes. On `bdfc5d8f`, 88 commits older,
-the same scenarios gave identical results, gas included, before notes were
-added.
+`-dirty` if that source has local changes. Before notes were added, the
+scenarios of that time gave identical results, gas included, on `bdfc5d8f`, 88
+commits older. The owner-signature and explicit-zero-`msg` scenarios came later
+and have not run there.
 
 The old-limit regression deploys a separate dispatcher with only the pinned
 settlement limit changed back to 1.4 million. It requires settlement to fail

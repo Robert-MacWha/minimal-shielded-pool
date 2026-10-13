@@ -48,11 +48,16 @@ const EMPTY: Uint8Array = new Uint8Array();
 
 export type Leaf = { cm: bigint; epoch: bigint; index: bigint };
 
-/** What one shield or settlement published; (block, tx, call) orders events on chain. */
+/**
+ * What one shield or settlement published. (block, tx) orders events on chain, and so does the
+ * order of a transaction's calls within one reply.
+ */
 export interface PoolEvent {
   block: bigint;
   tx: bigint; // the transaction's index in its block
-  call: number; // which shield or settlement of that transaction
+  // Its position among the calls one reply shows in its transaction: another reply that shows
+  // more or fewer of them numbers the same call differently, so this never identifies a call.
+  call: number;
   notes: Uint8Array;
   leaves: Leaf[];
   spent: bigint[]; // nullifiers
