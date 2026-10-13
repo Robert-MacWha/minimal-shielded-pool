@@ -749,6 +749,33 @@ test("hidden calls: calls left out of eth_getLogs are rebuilt from receipts or c
   }
 });
 
+test("hidden calls: a block's receipts are read once, however many of its calls are hidden", async () => {
+  // Shown and hidden shields alternate in one block, so each shown one after the first leaves a
+  // gap; rebuilding them must not read the block's receipts once per gap.
+  const chain = new Chain();
+  const toAlice = n.directChannel(ALICE.ownerPk, ALICE.directSecret(0n));
+  const values = Array.from({ length: 8 }, (_, i) => ETH + BigInt(i));
+  for (const [i, value] of values.entries()) {
+    const { note, cm } = paid(ALICE.ownerPk, toAlice, value);
+    chain.add(n.shieldNotes(note), [cm], [], { ...SHIELD, sameBlock: i > 0 });
+  }
+  const { block } = chain.events[0];
+  const dir = mkdtempSync(join(TMP, "reads-"));
+  const state = join(dir, "state.json");
+  const node = await serve(chain, { block }, { hidden: [0, 2, 4, 6] });
+  try {
+    await cli(["scan", "--config", writeConfig(dir, node.url), "--state", state, ...WALLET]);
+    const reads = node.requests.filter(
+      (call) => call.method === "eth_getBlockReceipts" && BigInt(call.params[0]) === block,
+    );
+    assert.equal(reads.length, 1);
+  } finally {
+    await node.close();
+  }
+  const saved = record(readFileSync(state, "utf8")).notes as Record<string, unknown>[];
+  assert.deepEqual(sorted(saved.map((r) => BigInt(r.value as bigint))), values);
+});
+
 test("epoch rollover: a leaf that skips a whole epoch stops the scan", () => {
   // Epoch 0 closed full, and the next leaf the node shows is in epoch 2: all of epoch 1 is
   // missing from its logs.

@@ -263,8 +263,8 @@ settlement, so nothing shows the gap. The client refuses a node's reply over 16
 MiB before parsing it, except a reply to `eth_getBlockReceipts` or
 `eth_getTransactionReceipt`. When one `eth_getLogs` range holds more than about
 5,000 ML-KEM shields, `scan` needs a smaller `--chunk`. Receipts, which `scan`
-reads one block per call after a gap in the leaves or an epoch seen one leaf
-short, are read whole: anyone can fill a block with logs, and ethrex repeats
+reads a block at a time, and each block once per scan, after a gap in the
+leaves or an epoch seen one leaf short, are read whole: anyone can fill a block with logs, and ethrex repeats
 each frame's logs in its receipt's top-level logs, so even one transaction's
 receipt can honestly pass 16 MiB. The node you chose, or anyone on a plain-http
 path to it, can therefore still exhaust the client's memory with a receipt

@@ -571,6 +571,22 @@ export async function scanToFinalized(
         "trust",
     );
   }
+  // The fallback keeps the calls of the last block whose receipts it read. A block in which
+  // hidden and shown calls alternate shows a gap at each shown call, and anyone can fill a
+  // block that way, so reading it again for each gap would cost every wallet a read per call.
+  let lastRead: { block: bigint; calls: PoolEvent[] } | undefined;
+  async function* receiptCalls(from: bigint, to: bigint) {
+    for (let block = from; block <= to; block++) {
+      if (lastRead?.block !== block) {
+        let calls: PoolEvent[] = [];
+        for await (const logs of receiptLogs(chain, scanner.pool, block, block)) {
+          calls = eventsFromLogs(logs);
+        }
+        lastRead = { block, calls };
+      }
+      yield* lastRead.calls;
+    }
+  }
   // Each reply's events are applied before the next reply is read, here and in the receipts
   // fallback, so a scan holds one reply at a time: a node that sends many eth_getLogs replies
   // under rpc()'s cap must not be able to fill the heap, which aborts the process. rpc() reads a
@@ -587,12 +603,10 @@ export async function scanToFinalized(
         const from = maxBigint(scanner.leafBlock, deployment);
         const [first] = event.leaves;
         const sameTx: PoolEvent[] = [];
-        for await (const logs of receiptLogs(chain, scanner.pool, from, event.block)) {
-          for (const call of eventsFromLogs(logs)) {
-            const order = compareKeys([call.block, call.tx], [event.block, event.tx]);
-            if (order === 0) sameTx.push(call);
-            else if (order < 0 && !scanner.applied(call)) scanner.scan(call, false);
-          }
+        for await (const call of receiptCalls(from, event.block)) {
+          const order = compareKeys([call.block, call.tx], [event.block, event.tx]);
+          if (order === 0) sameTx.push(call);
+          else if (order < 0 && !scanner.applied(call)) scanner.scan(call, false);
         }
         const own = sameTx.findIndex((call) =>
           call.leaves.some((l) => l.epoch === first.epoch && l.index === first.index),
