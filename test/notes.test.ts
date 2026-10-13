@@ -372,15 +372,22 @@ function callLogs(event: Call) {
 
 const txOf = (e: PoolEvent) => `${e.block},${e.tx}`;
 
-/** The chain's events as eth_getLogs results, without the transactions of `hidden` events. */
-function rpcLogs(chain: Chain, hidden: readonly number[] = []) {
+/**
+ * The chain's events as eth_getLogs results, without the transactions of `hidden` events or the
+ * logs of `hiddenCalls` events.
+ */
+function rpcLogs(
+  chain: Chain,
+  hidden: readonly number[] = [],
+  hiddenCalls: readonly number[] = [],
+) {
   const leftOut = new Set(hidden.map((i) => txOf(chain.events[i])));
   const counter = new Map<bigint, number>();
-  return chain.events.flatMap((event) =>
+  return chain.events.flatMap((event, i) =>
     callLogs(event).flatMap((log) => {
       const position = counter.get(event.block) ?? 0;
       counter.set(event.block, position + 1);
-      if (leftOut.has(txOf(event))) return [];
+      if (leftOut.has(txOf(event)) || hiddenCalls.includes(i)) return [];
       const [block, tx] = [hexPadded(event.block, 1), hexPadded(event.tx, 1)];
       const transactionHash = hexPadded(event.block, 32) + hexPadded(event.tx, 32).slice(2);
       const logIndex = hexPadded(BigInt(position), 1);
@@ -389,19 +396,25 @@ function rpcLogs(chain: Chain, hidden: readonly number[] = []) {
   );
 }
 
-type Hiding = { hidden?: number[]; unreceipted?: number[]; reverted?: Call };
+type Hiding = {
+  hidden?: number[];
+  hiddenCalls?: number[];
+  unreceipted?: number[];
+  reverted?: Call;
+};
 
 /**
  * A local JSON-RPC node. eth_getLogs leaves out the transactions of `hidden` events, as ethrex
- * does for a failed fourth frame; their receipts still show them unless also `unreceipted`, and
+ * does for a failed fourth frame, and the logs of `hiddenCalls` events, whose transactions
+ * succeeded; their receipts still show them unless also `unreceipted`, and
  * their failed frames list the logs of `reverted`, whose effects were undone, so a scan must not
  * count them. Every transaction is a frame transaction with its pool logs in frame 2, after a
  * copy of its first LeafAppended log that another contract emits, which a scan must skip.
  * `finalized` is read on every request, so a test can move the finalized head.
  */
 async function serve(chain: Chain, finalized: { block: bigint }, hiding: Hiding = {}) {
-  const { hidden = [], unreceipted = [], reverted } = hiding;
-  const logs = rpcLogs(chain, hidden);
+  const { hidden = [], hiddenCalls = [], unreceipted = [], reverted } = hiding;
+  const logs = rpcLogs(chain, hidden, hiddenCalls);
   const failed = new Set(hidden.map((i) => txOf(chain.events[i])));
   const receipted = chain.events.filter((_, i) => !unreceipted.includes(i));
   const receipts = (block: bigint) => {
@@ -662,12 +675,17 @@ test("hidden calls: calls left out of eth_getLogs are rebuilt from receipts or c
   chain.add(n.shieldNotes(bobShield.note), [bobShield.cm], [], SHIELD);
   const aliceNotes = new Map([ETH, ETH / 2n, ETH / 5n, 2n * ETH, ETH / 10n].map((v) => [v, false]));
 
-  const shields = (sameBlock: number | null) => {
+  const shields = (sameBlock: number | null, sameTx: number[] = []) => {
     const built = new Chain();
     const toAlice = n.directChannel(ALICE.ownerPk, ALICE.directSecret(0n));
     for (let i = 0; i < 5; i++) {
       const { note, cm } = paid(ALICE.ownerPk, toAlice, ETH + BigInt(i));
-      const options = { ...SHIELD, sameBlock: i === sameBlock, skip: i === 3 ? 5n : 0n };
+      const options = {
+        ...SHIELD,
+        sameBlock: i === sameBlock,
+        ...(sameTx.includes(i) ? { sameTx: true as const } : {}),
+        skip: i === 3 ? 5n : 0n,
+      };
       built.add(n.shieldNotes(note), [cm], [], options);
     }
     return built;
@@ -682,6 +700,11 @@ test("hidden calls: calls left out of eth_getLogs are rebuilt from receipts or c
     { chain: shields(2), hidden: [1, 3], outcome: fives },
     // A hidden call in the block of the event that shows the gap, after it.
     { chain: shields(3), hidden: [1, 3], outcome: fives },
+    // Only the first of a transaction's two calls is left out, so eth_getLogs numbers the second
+    // as the transaction's first call.
+    { chain: shields(null, [2]), hidden: [], hiddenCalls: [1], outcome: fives },
+    // The middle one of three is left out: the first, already scanned, is not applied again.
+    { chain: shields(null, [2, 3]), hidden: [], hiddenCalls: [2], outcome: fives },
     // The hidden call is the newest leaf when the first scan runs, which ends blocks after
     // it; a later leaf shows the gap in the next scan, through the same node or an honest one.
     { chain: shields(null), hidden: [2], early: true, outcome: fives },
@@ -692,7 +715,12 @@ test("hidden calls: calls left out of eth_getLogs are rebuilt from receipts or c
     await t.test(`case ${number}`, async () => {
       const state = join(dir, `state-${number}.json`);
       const scan = async (block: bigint, hide: boolean) => {
-        const hiding = { ...c, hidden: hide ? c.hidden : [], reverted: revertedSpend };
+        const hiding = {
+          ...c,
+          hidden: hide ? c.hidden : [],
+          hiddenCalls: hide ? c.hiddenCalls : [],
+          reverted: revertedSpend,
+        };
         const node = await serve(c.chain, { block }, hiding);
         try {
           const config = writeConfig(dir, node.url);

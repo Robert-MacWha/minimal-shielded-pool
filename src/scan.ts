@@ -571,7 +571,6 @@ export async function scanToFinalized(
         "trust",
     );
   }
-  const at = (e: PoolEvent) => [e.block, e.tx, BigInt(e.call)];
   // Each reply's events are applied before the next reply is read, here and in the receipts
   // fallback, so a scan holds one reply at a time: a node that sends many eth_getLogs replies
   // under rpc()'s cap must not be able to fill the heap, which aborts the process. rpc() reads a
@@ -582,14 +581,24 @@ export async function scanToFinalized(
         // The missing calls came after the last leaf seen (possibly in its block) and before
         // this event. Apply each one not applied yet, whether or not this node's eth_getLogs
         // shows it, since an earlier scan may have used a node that left it out. A call
-        // without leaves changes nothing when applied twice.
+        // without leaves changes nothing when applied twice. In the event's own transaction,
+        // the calls before it are those its receipt lists before the call with its first leaf:
+        // call numbers cannot tell, since eth_getLogs numbers only the calls it shows.
         const from = maxBigint(scanner.leafBlock, deployment);
+        const [first] = event.leaves;
+        const sameTx: PoolEvent[] = [];
         for await (const logs of receiptLogs(chain, scanner.pool, from, event.block)) {
           for (const call of eventsFromLogs(logs)) {
-            if (compareKeys(at(call), at(event)) < 0 && !scanner.applied(call)) {
-              scanner.scan(call, false);
-            }
+            const order = compareKeys([call.block, call.tx], [event.block, event.tx]);
+            if (order === 0) sameTx.push(call);
+            else if (order < 0 && !scanner.applied(call)) scanner.scan(call, false);
           }
+        }
+        const own = sameTx.findIndex((call) =>
+          call.leaves.some((l) => l.epoch === first.epoch && l.index === first.index),
+        );
+        for (const call of sameTx.slice(0, Math.max(own, 0))) {
+          if (!scanner.applied(call)) scanner.scan(call, false);
         }
       }
       scanner.scan(event);
