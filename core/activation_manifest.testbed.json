@@ -40,9 +40,9 @@
     "core/contracts/src/PoseidonT3.sol": "f353af63ac124e51a37e78dc5278bcb2e93c19e44aa8dd13a4ecb4c54212720b",
     "core/contracts/src/PoseidonT4.sol": "2384b8f71a2ed09f3b16c6b0d135bedcd293cb1c862e8a3c893d0ac79eae0960",
     "core/contracts/src/ShieldedPoolLogic.sol": "e5c7a4d5d2b213a7f2617ca32d18780f7744d94b1aa26f4e90def06fb1fb551f",
-    "core/dispatcher/ShieldedPoolDispatcher.yul": "61b1886b702949232c9e63d672c48b181175faa552e1a1473f3489d1f637629f",
+    "core/dispatcher/ShieldedPoolDispatcher.yul": "ca88f6d4c21a1d3d4cf48aba682f1012a6b88158685d942f328f712b7db1f2b5",
     "core/artifacts/shielded_pool_dispatcher_init.hex": "3e896d2ac55a89338df1affbeb9afcfc369e8529fdbf6ddfa873419f13f60a47",
-    "src/gas.ts": "aa90b2fa4732952771adfbb6d55827423d83f47fd411b0035e38a602d7018bbb"
+    "src/gas.ts": "9dc5e86353bf9cbf5173a02686ff6a9ffa6885955eaaea81fcb7487cad2afc12"
   },
   "compiler": {
     "default": {

@@ -6,7 +6,8 @@
 /// account's storage.
 /// @dev Runtime layout: this code, then the ShieldedPoolLogic address and the Groth16
 /// verifier address as two 32-byte words. The proof check calls the verifier directly,
-/// not through the logic, because ethrex refuses a delegatecall inside a VERIFY frame.
+/// not through the logic, as an earlier ethrex mempool policy required; it also keeps the
+/// logic's code out of validation.
 /// The dispatcher deployed before the testnet's relaunch is archived byte-exact under the
 /// evidence-archive tag, in evidence/vectors/2026-09-01-hegota-final-profile/. It reads
 /// an older transaction encoding: flat fee fields, one gas limit per frame, EIP-8250's
