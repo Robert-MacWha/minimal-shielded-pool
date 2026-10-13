@@ -40,7 +40,7 @@ const RECEIPT = "minimal-shielded-pool/disclosure";
 const VERSION = 1;
 
 /** A receipt as exportReceipt builds it; the file keeps its key order. */
-export type Receipt = Awaited<ReturnType<typeof exportReceipt>>;
+export type Receipt = Awaited<ReturnType<typeof exportReceipt>>["receipt"];
 /** A note as verify reports it; spent is "not disclosed" without a nullifier key. */
 interface VerifiedNote {
   cm: string;
@@ -64,6 +64,9 @@ const at = ({ cm, epoch, index }: Position) => `${cm},${epoch},${index}`;
  * use a node you control. A receipt never holds nk or rho, and only notes the fixture
  * spends get a nullifier key: a payment's output may be someone else's note, whose later spend
  * is theirs to disclose. A chain that cannot answer stops the export with its ChainError.
+ *
+ * A note named in `only` that yields no entry is refused, since the node may hide the
+ * transaction that created it; with every note, `skipped` counts the notes left out.
  */
 export async function exportReceipt(
   chain: Chain,
@@ -93,6 +96,7 @@ export async function exportReceipt(
     .sort(
       ([a, x], [b, y]) => Number(x.value === 0n) - Number(y.value === 0n) || compareBigint(a, b),
     );
+  const shown = new Set<bigint>();
   for (const [cm, note] of order) {
     const label = `note ${hex32(cm).slice(0, 18)}...`;
     const real = note.value !== 0n;
@@ -127,6 +131,7 @@ export async function exportReceipt(
             "spent. Pass --address-wide to disclose that",
         );
       }
+      shown.add(cm);
       out.push({
         epoch,
         index,
@@ -140,7 +145,19 @@ export async function exportReceipt(
       });
     }
   }
-  return { receipt: RECEIPT, version: VERSION, chainId, pool: hexPadded(pool, 40), notes: out };
+  // ethrex 247e2dd2 leaves out of eth_getLogs every log of a transaction whose fourth frame
+  // failed, so a note it created looks like one never created.
+  for (const cm of only ?? []) {
+    if (shown.has(cm)) continue;
+    const label = `note ${hex32(cm).slice(0, 18)}...`;
+    if (!notes.has(cm)) throw new ReceiptError(`the fixture does not open ${label}`);
+    throw new ReceiptError(
+      `${label} is not in this node's logs: it has not landed, or the node hides the ` +
+        "transaction that created or spent it; use a node that shows it",
+    );
+  }
+  const receipt = { receipt: RECEIPT, version: VERSION, chainId, pool: hexPadded(pool, 40) };
+  return { receipt: { ...receipt, notes: out }, skipped: order.length - shown.size };
 }
 
 /**
@@ -373,9 +390,15 @@ export async function exportCommand(options: {
     const from = "deploymentBlock" in config ? config.deploymentBlock : 0;
     const fromBlock = parseDec(from, "the config's deploymentBlock");
     const chain = new RpcChain(options.rpc);
-    const receipt = await exportReceipt(chain, chainId, pool, fx, only, { fromBlock, addressWide });
+    const exported = await exportReceipt(chain, chainId, pool, fx, only, {
+      fromBlock,
+      addressWide,
+    });
+    const { receipt, skipped } = exported;
     writeNewPrivate(output, stringify(receipt, 1) + "\n");
-    return `wrote ${output}: ${receipt.notes.length} notes\n`;
+    const left =
+      skipped > 0 ? `; ${skipped} of the fixture's notes are not in this node's logs` : "";
+    return `wrote ${output}: ${receipt.notes.length} notes${left}\n`;
   });
 }
 

@@ -362,7 +362,10 @@ domain key unless you pass `--address-wide`. Export reads the
 pool's logs from the node and matches them locally. When those logs show no
 spend of a note the fixture spends, or no transaction that created it, export
 reads that note's nullifier slot in the EIP-8250 nonce manager to catch a spend
-whose logs the node left out. The slot is a hash of the pool and the nullifier,
+whose logs the node left out. A creation the node left out looks like no
+creation, so export refuses a note you name that the logs do not show, and with
+`--all` it says how many of the fixture's notes it left out. The slot is a hash
+of the pool and the nullifier,
 so once a spend publishes the nullifier, the node can tell which spend the
 export looked up. Verify checks the receipt against finalized blocks and the
 pool's deployed code. Both
