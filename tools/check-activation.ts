@@ -283,9 +283,13 @@ export function checkActivation(
 
   const profile = object(field(manifest, "profile", "the manifest"), "profile");
   const read = (key: string) => field(profile, key, "profile");
+  // Gas is a count. The bounds below are one-sided, so a negative, fractional or infinite value
+  // (1e400 parses as Infinity) would pass them.
   const number = (key: string) => {
     const value = read(key);
-    if (!isNumber(value)) throw new CheckError(`${key} must be a JSON number`);
+    if (typeof value !== "bigint" || value < 0n) {
+      throw new CheckError(`${key} must be a nonnegative JSON integer`);
+    }
     return value;
   };
   const wire = read("wire_profile");
