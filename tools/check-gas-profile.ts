@@ -23,7 +23,7 @@ import * as gas from "../src/gas.ts";
 import { canonical, isObject, parse } from "../src/json.ts";
 import { check, readText, ROOT } from "./check.ts";
 
-const PRE_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 294_401n;
+export const PRE_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 294_401n;
 const PRE_PR_12279_KEYED_NONCE_EXECUTION_GAS = 2n * 20_000n;
 // Measured on a devnet running EIP-8250 at f3079a09e8 and EIP-8272 at 824cbc0b0e, the
 // ten-input verifier's proof frame used up to 255,011; the drop from the pre-12279 figure is
@@ -31,7 +31,7 @@ const PRE_PR_12279_KEYED_NONCE_EXECUTION_GAS = 2n * 20_000n;
 // compression cuts the verifier to three public inputs, and the owner's intent digest adds
 // about 610: on native ethrex 247e2dd2 the proof frame uses 210,659, plus 90 with a fourth
 // frame and 27 when nf1 > nf2 (the dispatcher sorts the nonce keys), so at most 210,776.
-const POST_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 210_776n;
+export const POST_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS = 210_776n;
 // The proof frame needs a larger limit than it uses. Each nested call keeps back 1/64 of the
 // gas it could forward (EIP-150), once from the dispatcher to the verifier and once from the
 // verifier to the pairing precompile. On native ethrex 247e2dd2 the heaviest spend (a fourth
@@ -44,7 +44,7 @@ const MIN_WORKING_VERIFY_FRAME_GAS = 216_751n;
 // sixteen distinct roots are sixteen cold SLOADs, 33,600 gas before the rest of the verifier
 // runs. (An earlier measurement repeated one tuple, so its identical storage keys paid one cold
 // SLOAD and fifteen warm ones.)
-const MAX_OBSERVED_RECENT_ROOT_FRAME_GAS = 5_579n;
+export const MAX_OBSERVED_RECENT_ROOT_FRAME_GAS = 5_579n;
 const CONSERVATIVE_VERIFY_STATE_BOUND =
   gas.SPEND_NONCE_KEY_COUNT * gas.KEYED_NONCE_FIRST_USE_STATE_GAS;
 
@@ -67,10 +67,10 @@ const EIP_8038_COLD_WRITE_GAS = 12_100n;
 // though the measured path already contains writes: the ceiling of margin * (64/63)^2.
 const WITH_WRITE_MARGIN =
   NATIVE_MAX_OBSERVED_SETTLEMENT_GAS + MAX_SSTORE_OPERATIONS * EIP_8038_COLD_WRITE_GAS;
-const CONSERVATIVE_SETTLEMENT_EXECUTION_BOUND =
+export const CONSERVATIVE_SETTLEMENT_EXECUTION_BOUND =
   (WITH_WRITE_MARGIN * 64n * 64n + 63n * 63n - 1n) / (63n * 63n);
 // EIP-8037 charges the same state gas for any new storage slot.
-const CONSERVATIVE_SETTLEMENT_STATE_BOUND =
+export const CONSERVATIVE_SETTLEMENT_STATE_BOUND =
   MAX_NEW_STORAGE_SLOTS * gas.KEYED_NONCE_FIRST_USE_STATE_GAS;
 
 // What the frozen profile had to declare for the same work, as one number.

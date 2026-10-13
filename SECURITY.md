@@ -311,8 +311,9 @@ archive, which nobody guarantees to keep.
   checked by hand. The committed key's phase 1 is not recorded, so it cannot
   be checked in full ([README](README.md#what-the-tests-cover)).
 - Correct ethrex implementations of EIP-8141, EIP-8250, EIP-8272 and EIP-7843.
-  The activation manifest records the EIP-8250 and EIP-8272 revisions, and the
-  native suite pins ethrex `247e2dd2`.
+  The activation gate requires the manifest to name the EIP-8250 and EIP-8272
+  revisions the dispatcher implements, and the native suite pins ethrex
+  `247e2dd2`.
 - A fork-scoped proof that settlement's gas limits cover every path. The
   [native suite](test/native/README.md) measures them; it does not prove them.
 - A mempool policy that admits the declared validation budget

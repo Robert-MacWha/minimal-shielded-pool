@@ -90,9 +90,12 @@ test("the gate CLI", async () => {
   }
 });
 
-const GAS_EVIDENCE = [
+const COUNTS = [
   "hegota_profile_2_budget",
+  "chain_id",
+  "pre_pr_12279_max_observed_verify_execution_gas",
   "post_pr_12279_max_observed_verify_execution_gas",
+  "max_observed_recent_root_frame_gas",
   "conservative_settle_bound",
   "conservative_settle_state_bound",
 ];
@@ -126,8 +129,26 @@ describe("malformed or self-certified manifests", () => {
     // 238600.
     ["a verify budget one over", set("required_verify_budget", 238601), "budget is inconsistent"],
     ["a verify budget one under", set("required_verify_budget", 238599), "budget is inconsistent"],
-    // The settle frame must have more gas than the bound, not just as much.
-    ["a settle bound at the frame gas", set("conservative_settle_bound", 2000000), "fork bound"],
+    // Each EIP revision and the public-mempool budget are part of the profile.
+    profile("eip_8250_merge", "f3079a09e8"),
+    profile("eip_8272_pin", "0000000000"),
+    profile("eip_8272_carrier", "frame-data"),
+    profile("eip_8141_public_mempool_budget", 100001),
+    // The gas evidence must be check-gas-profile.ts's own figures, so the manifest cannot claim
+    // a bound or a measurement that no check has seen, even one under the frame limits.
+    ...[
+      ["conservative_settle_bound", 1868575],
+      ["conservative_settle_state_bound", 0],
+      ["post_pr_12279_max_observed_verify_execution_gas", 210777],
+      ["pre_pr_12279_max_observed_verify_execution_gas", 294400],
+      ["max_observed_recent_root_frame_gas", 999999],
+    ].map(([key, value]): [string, (m: Manifest) => void, string] => [
+      `a ${key} other than check-gas-profile.ts's`,
+      set(key as string, value),
+      `${key} differs from check-gas-profile.ts`,
+    ]),
+    ["a chain ID of 0", set("chain_id", 0), "chain_id must be a positive JSON integer"],
+    ["an unknown profile field", set("evidence_note", 1), "unknown profile field: evidence_note"],
   ];
   for (const allowTestbed of [false, true]) {
     const mode = allowTestbed ? ", --allow-testbed" : "";
@@ -138,8 +159,8 @@ describe("malformed or self-certified manifests", () => {
       const text = BASE_TEXT.replace('"phase2_contributions": 1,', '"phase2_contributions": 1.0,');
       refused(text, "JSON integer", { allowTestbed });
     });
-    // The gas evidence is checked against one-sided bounds, so it must be a count.
-    for (const key of GAS_EVIDENCE) {
+    // Gas and the chain ID are counts.
+    for (const key of COUNTS) {
       for (const value of ["-1", "0.5", "1e400"]) {
         test(`${key} written as ${value}${mode}`, () => {
           const token = new RegExp(`("${key}": )[0-9]+`);
