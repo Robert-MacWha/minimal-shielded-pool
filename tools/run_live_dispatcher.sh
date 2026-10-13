@@ -20,6 +20,8 @@ export ETH_KEYSTORE=$DEPLOYER_KEYSTORE ETH_PASSWORD=$DEPLOYER_PASSWORD_FILE
 }
 MANIFEST=../core/activation_manifest.testbed.json
 node check-activation.ts "$MANIFEST" --allow-testbed
+# The manifest's gas evidence equals this tool's figures; this checks them against the limits.
+node check-gas-profile.ts >/dev/null
 
 BN=../core/contracts
 PRICE=(--gas-price 3000000000 --priority-gas-price 1000000000)

@@ -13928,6 +13928,184 @@
       ]
     },
     {
+      "name": "signature-explicit-zero-message-rejected",
+      "steps": [
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "frames": null,
+            "gas_spent": 11026765,
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+            "result": "Success",
+            "state_gas_used": 10887480,
+            "valid": true
+          },
+          "paid_fee": {
+            "amount": "0x150829a",
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a"
+          },
+          "raw": "deploy-poseidon3.hex",
+          "raw_hash": "0x22cd9c557847e26caca99b3bf9af2b1494819dd4e9ea80437157069b0297dcd5",
+          "sender": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+          "slot_number": 100
+        },
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "frames": null,
+            "gas_spent": 14530874,
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+            "result": "Success",
+            "state_gas_used": 14354460,
+            "valid": true
+          },
+          "paid_fee": {
+            "amount": "0x1bb7274",
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a"
+          },
+          "raw": "deploy-poseidon4.hex",
+          "raw_hash": "0xdcc1e6b8c328e532fe2dabc48179a6eaa11277a9592fe31c2240c89a46cfc07b",
+          "sender": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+          "slot_number": 100
+        },
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "frames": null,
+            "gas_spent": 2821263,
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+            "result": "Success",
+            "state_gas_used": 2769300,
+            "valid": true
+          },
+          "paid_fee": {
+            "amount": "0x56191e",
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a"
+          },
+          "raw": "deploy-verifier.hex",
+          "raw_hash": "0xd4ef0c525ead64694de22b0eebb49c0df44c42c1f0337065d22d9448e86d9bb6",
+          "sender": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+          "slot_number": 100
+        },
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "frames": null,
+            "gas_spent": 12143203,
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+            "result": "Success",
+            "state_gas_used": 11993670,
+            "valid": true
+          },
+          "paid_fee": {
+            "amount": "0x17294c6",
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a"
+          },
+          "raw": "deploy-logic.hex",
+          "raw_hash": "0xd320ebaa8aeb02921624a3914a0e963de4260967dbb39784f8f017daeb4c01b2",
+          "sender": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+          "slot_number": 100
+        },
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "frames": null,
+            "gas_spent": 3251745,
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+            "result": "Success",
+            "state_gas_used": 3183930,
+            "valid": true
+          },
+          "paid_fee": {
+            "amount": "0x633c42",
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a"
+          },
+          "raw": "deploy-pool.hex",
+          "raw_hash": "0xe75fa1d00b9b1b5d28ec4c7854f88e0b20d6742dd164c486a2495912a408f1af",
+          "sender": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+          "slot_number": 100
+        },
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "frames": null,
+            "gas_spent": 989022,
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+            "result": "Success",
+            "state_gas_used": 195840,
+            "valid": true
+          },
+          "paid_fee": {
+            "amount": "0x1e2ebc",
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a"
+          },
+          "raw": "deposit-a.hex",
+          "raw_hash": "0xfddf71178b2ca81f9eb30a10e700a36d1e04b67273a7621ca482abec5cdffca6",
+          "sender": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+          "slot_number": 100
+        },
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "frames": null,
+            "gas_spent": 926563,
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+            "result": "Success",
+            "state_gas_used": 97920,
+            "valid": true
+          },
+          "paid_fee": {
+            "amount": "0x1c46c6",
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a"
+          },
+          "raw": "deposit-b.hex",
+          "raw_hash": "0x3cded73a119c31397b54c0b144872e1fa5a2ed992c1e50733be7d7b0348e65cf",
+          "sender": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+          "slot_number": 100
+        },
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "frames": null,
+            "gas_spent": 138850,
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+            "result": "Success",
+            "state_gas_used": 97920,
+            "valid": true
+          },
+          "paid_fee": {
+            "amount": "0x43cc4",
+            "payer": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a"
+          },
+          "raw": "publish-initial.hex",
+          "raw_hash": "0xcbd9ce5d16ee34a128902a7a9b95ccd44bb69b296e1f10ea1a877352fad34c2c",
+          "sender": "0x2f6e5427e34f345fada1656a9ad4fcdfe3611e0a",
+          "slot_number": 100
+        },
+        {
+          "effective_gas_price": "0x2",
+          "errors": [],
+          "execution": {
+            "error": "TxValidation(InvalidFrameTransactionFormat(\"Signature 0: explicit msg must not be zero digest\"))",
+            "valid": false
+          },
+          "paid_fee": null,
+          "raw": "signature-zero-message.hex",
+          "raw_hash": "0xf6b1553b6b4d43ce077c5cfa264e58cb29155bee74310d939f8c4ce0259c61cd",
+          "sender": "0x87ee85741a55f01b01caf9c2eafd5b14af8028cf",
+          "slot_number": 101
+        }
+      ]
+    },
+    {
       "name": "owner-signature-missing-rejected",
       "steps": [
         {

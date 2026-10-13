@@ -90,6 +90,16 @@ test("the gate CLI", async () => {
   }
 });
 
+const COUNTS = [
+  "hegota_profile_2_budget",
+  "chain_id",
+  "pre_pr_12279_max_observed_verify_execution_gas",
+  "post_pr_12279_max_observed_verify_execution_gas",
+  "max_observed_recent_root_frame_gas",
+  "conservative_settle_bound",
+  "conservative_settle_state_bound",
+];
+
 // None of these refusals depends on --allow-testbed.
 describe("malformed or self-certified manifests", () => {
   const verified = { independent_verification: true };
@@ -115,11 +125,30 @@ describe("malformed or self-certified manifests", () => {
     profile("pool_profile", "position-notes-v2"),
     ["string verify_frame_gas", set("verify_frame_gas", "225000"), "verify_frame_gas does not"],
     ["the previous wire_profile", set("wire_profile", "position-notes-v2"), "wire profile"],
-    // The budget is the recent root, VERIFY and signature gas: 8000 + 225000 + 2800 = 235800.
-    ["a verify budget one over", set("required_verify_budget", 235801), "budget is inconsistent"],
-    ["a verify budget one under", set("required_verify_budget", 235799), "budget is inconsistent"],
-    // The settle frame must have more gas than the bound, not just as much.
-    ["a settle bound at the frame gas", set("conservative_settle_bound", 2000000), "fork bound"],
+    // The budget is the recent root, VERIFY and two signatures' gas: 8000 + 225000 + 2 * 2800 =
+    // 238600.
+    ["a verify budget one over", set("required_verify_budget", 238601), "budget is inconsistent"],
+    ["a verify budget one under", set("required_verify_budget", 238599), "budget is inconsistent"],
+    // Each EIP revision and the public-mempool budget are part of the profile.
+    profile("eip_8250_merge", "f3079a09e8"),
+    profile("eip_8272_pin", "0000000000"),
+    profile("eip_8272_carrier", "frame-data"),
+    profile("eip_8141_public_mempool_budget", 100001),
+    // The gas evidence must be check-gas-profile.ts's own figures, so the manifest cannot claim
+    // a bound or a measurement that no check has seen, even one under the frame limits.
+    ...[
+      ["conservative_settle_bound", 1868575],
+      ["conservative_settle_state_bound", 0],
+      ["post_pr_12279_max_observed_verify_execution_gas", 210777],
+      ["pre_pr_12279_max_observed_verify_execution_gas", 294400],
+      ["max_observed_recent_root_frame_gas", 999999],
+    ].map(([key, value]): [string, (m: Manifest) => void, string] => [
+      `a ${key} other than check-gas-profile.ts's`,
+      set(key as string, value),
+      `${key} differs from check-gas-profile.ts`,
+    ]),
+    ["a chain ID of 0", set("chain_id", 0), "chain_id must be a positive JSON integer"],
+    ["an unknown profile field", set("evidence_note", 1), "unknown profile field: evidence_note"],
   ];
   for (const allowTestbed of [false, true]) {
     const mode = allowTestbed ? ", --allow-testbed" : "";
@@ -130,6 +159,17 @@ describe("malformed or self-certified manifests", () => {
       const text = BASE_TEXT.replace('"phase2_contributions": 1,', '"phase2_contributions": 1.0,');
       refused(text, "JSON integer", { allowTestbed });
     });
+    // Gas and the chain ID are counts.
+    for (const key of COUNTS) {
+      for (const value of ["-1", "0.5", "1e400"]) {
+        test(`${key} written as ${value}${mode}`, () => {
+          const token = new RegExp(`("${key}": )[0-9]+`);
+          assert.match(BASE_TEXT, token);
+          const text = BASE_TEXT.replace(token, `$1${value}`);
+          refused(text, `${key} must be a nonnegative JSON integer`, { allowTestbed });
+        });
+      }
+    }
     test(`every artifact the committed manifest pins is required${mode}`, () => {
       for (const rel of PINNED) {
         const text = mutated((m) => delete m.artifacts[rel]);

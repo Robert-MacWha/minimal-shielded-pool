@@ -823,7 +823,7 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
     spend("spend-before-seq-replay", initial, paidA),
     refused("replay-spent-keys-at-seq-one", initial, undefined, { ...spent, nonceSeq: 1n }),
   ]);
-  // The victim's signature over the transaction hash, re-sent as an explicit message in a
+  // The victim's signature over the signature hash, re-sent as an explicit message in a
   // transaction with another fourth frame, is valid under EIP-8141.
   const victim = frameTx(initial);
   const rewrap = frameTx(initial, { mutate: setTail });
@@ -840,11 +840,29 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   );
   const otherKey = refused("signature-other-key", initial, undefined, { raw: rawTx(other) });
   addCase("signature-by-another-key-rejected", [otherKey]);
+  // The dispatcher takes the authorizer's signature only when SIGPARAM reports its msg as 0,
+  // which EIP-8141 reserves for the signature hash by making an explicit zero msg invalid. A
+  // client that admitted one would let the authorizer's signature over that fixed digest pass
+  // as one over the transaction, here with another fourth frame, so the protocol must refuse it
+  // before any frame runs.
+  const zeroMsg = frameTx(initial, { mutate: setTail });
+  const zero = new Uint8Array(32);
+  const authorizer = fromHex(initial.authorizer_private_key, "authorizer key");
+  zeroMsg.signatures[0] = {
+    ...zeroMsg.signatures[0],
+    msg: zero,
+    signature: signHash(zero, authorizer),
+  };
+  const zeroStep = refused("signature-zero-message", initial, undefined, {
+    raw: rawTx(zeroMsg),
+    error: "explicit msg must not be zero digest",
+  });
+  addCase("signature-explicit-zero-message-rejected", [zeroStep]);
 
   // The owner's signature. Each case changes only the signatures of a valid spend, so the pool
   // must refuse it in VERIFY frame 1, before approval. A spend without the owner's signature,
   // or with a third signature, has another shape. A signature over another intent, over the
-  // same intent for another pool, or over the transaction hash does not carry the spend's
+  // same intent for another pool, or over the signature hash does not carry the spend's
   // intent digest. The intent signed by a key outside the owner set makes that key the owner,
   // which the proof does not name. The owner signs second, after the authorizer.
   const authorizerKey = fromHex(initial.authorizer_private_key, "authorizer key");

@@ -143,15 +143,15 @@ other nodes may lack it.
 
 ## Liveness
 
-Every spend has the pool as sender, so per-sender mempool limits apply to all
-users at once. EIP-8141's conservative rule keeps one pending frame transaction
-per sender; both ethrex revisions relax it for spends with disjoint nonce keys.
-`247e2dd2`'s MATCHA, on by default, charges each pending spend beyond the first
-to one width budget for the pool, at admission and again at every
-forkchoiceUpdated, and evicts spends it can no longer pay for. The budget
-refills only from the pool's finalized gas, so a few concurrent spends, or one
-note holder replacing a spend while another is pending, can delay everyone
-else's.
+Every spend has the pool as sender, so per-sender mempool limits, and per-sender
+caps on inclusion lists, apply to all users at once. EIP-8141's conservative
+rule keeps one pending frame transaction per sender; both ethrex revisions relax
+it for spends with disjoint nonce keys. `247e2dd2`'s MATCHA, on by default,
+charges each pending spend beyond the first to one width budget for the pool, at
+admission and again at every forkchoiceUpdated, and evicts spends it can no
+longer pay for. The budget refills only from the pool's finalized gas, so a few
+concurrent spends, or one note holder replacing a spend while another is
+pending, can delay everyone else's.
 
 Both revisions recheck every pending spend, its pairing check included, on each
 forkchoiceUpdated. A recheck takes an estimated 1.1 to 1.3 ms on fast hardware,
@@ -263,8 +263,8 @@ settlement, so nothing shows the gap. The client refuses a node's reply over 16
 MiB before parsing it, except a reply to `eth_getBlockReceipts` or
 `eth_getTransactionReceipt`. When one `eth_getLogs` range holds more than about
 5,000 ML-KEM shields, `scan` needs a smaller `--chunk`. Receipts, which `scan`
-reads one block per call after a gap in the leaves or an epoch seen one leaf
-short, are read whole: anyone can fill a block with logs, and ethrex repeats
+reads a block at a time, and each block once per scan, after a gap in the
+leaves or an epoch seen one leaf short, are read whole: anyone can fill a block with logs, and ethrex repeats
 each frame's logs in its receipt's top-level logs, so even one transaction's
 receipt can honestly pass 16 MiB. The node you chose, or anyone on a plain-http
 path to it, can therefore still exhaust the client's memory with a receipt
@@ -311,8 +311,9 @@ archive, which nobody guarantees to keep.
   checked by hand. The committed key's phase 1 is not recorded, so it cannot
   be checked in full ([README](README.md#what-the-tests-cover)).
 - Correct ethrex implementations of EIP-8141, EIP-8250, EIP-8272 and EIP-7843.
-  The activation manifest records the EIP-8250 and EIP-8272 revisions, and the
-  native suite pins ethrex `247e2dd2`.
+  The activation gate requires the manifest to name the EIP-8250 and EIP-8272
+  revisions the dispatcher implements, and the native suite pins ethrex
+  `247e2dd2`.
 - A fork-scoped proof that settlement's gas limits cover every path. The
   [native suite](test/native/README.md) measures them; it does not prove them.
 - A mempool policy that admits the declared validation budget

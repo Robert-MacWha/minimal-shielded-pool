@@ -48,11 +48,16 @@ const EMPTY: Uint8Array = new Uint8Array();
 
 export type Leaf = { cm: bigint; epoch: bigint; index: bigint };
 
-/** What one shield or settlement published; (block, tx, call) orders events on chain. */
+/**
+ * What one shield or settlement published. (block, tx) orders events on chain, and so does the
+ * order of a transaction's calls within one reply.
+ */
 export interface PoolEvent {
   block: bigint;
   tx: bigint; // the transaction's index in its block
-  call: number; // which shield or settlement of that transaction
+  // Its position among the calls one reply shows in its transaction: another reply that shows
+  // more or fewer of them numbers the same call differently, so this never identifies a call.
+  call: number;
   notes: Uint8Array;
   leaves: Leaf[];
   spent: bigint[]; // nullifiers
@@ -571,7 +576,22 @@ export async function scanToFinalized(
         "trust",
     );
   }
-  const at = (e: PoolEvent) => [e.block, e.tx, BigInt(e.call)];
+  // The fallback keeps the calls of the last block whose receipts it read. A block in which
+  // hidden and shown calls alternate shows a gap at each shown call, and anyone can fill a
+  // block that way, so reading it again for each gap would cost every wallet a read per call.
+  let lastRead: { block: bigint; calls: PoolEvent[] } | undefined;
+  async function* receiptCalls(from: bigint, to: bigint) {
+    for (let block = from; block <= to; block++) {
+      if (lastRead?.block !== block) {
+        let calls: PoolEvent[] = [];
+        for await (const logs of receiptLogs(chain, scanner.pool, block, block)) {
+          calls = eventsFromLogs(logs);
+        }
+        lastRead = { block, calls };
+      }
+      yield* lastRead.calls;
+    }
+  }
   // Each reply's events are applied before the next reply is read, here and in the receipts
   // fallback, so a scan holds one reply at a time: a node that sends many eth_getLogs replies
   // under rpc()'s cap must not be able to fill the heap, which aborts the process. rpc() reads a
@@ -582,14 +602,22 @@ export async function scanToFinalized(
         // The missing calls came after the last leaf seen (possibly in its block) and before
         // this event. Apply each one not applied yet, whether or not this node's eth_getLogs
         // shows it, since an earlier scan may have used a node that left it out. A call
-        // without leaves changes nothing when applied twice.
+        // without leaves changes nothing when applied twice. In the event's own transaction,
+        // the calls before it are those its receipt lists before the call with its first leaf:
+        // call numbers cannot tell, since eth_getLogs numbers only the calls it shows.
         const from = maxBigint(scanner.leafBlock, deployment);
-        for await (const logs of receiptLogs(chain, scanner.pool, from, event.block)) {
-          for (const call of eventsFromLogs(logs)) {
-            if (compareKeys(at(call), at(event)) < 0 && !scanner.applied(call)) {
-              scanner.scan(call, false);
-            }
-          }
+        const [first] = event.leaves;
+        const sameTx: PoolEvent[] = [];
+        for await (const call of receiptCalls(from, event.block)) {
+          const order = compareKeys([call.block, call.tx], [event.block, event.tx]);
+          if (order === 0) sameTx.push(call);
+          else if (order < 0 && !scanner.applied(call)) scanner.scan(call, false);
+        }
+        const own = sameTx.findIndex((call) =>
+          call.leaves.some((l) => l.epoch === first.epoch && l.index === first.index),
+        );
+        for (const call of sameTx.slice(0, Math.max(own, 0))) {
+          if (!scanner.applied(call)) scanner.scan(call, false);
         }
       }
       scanner.scan(event);

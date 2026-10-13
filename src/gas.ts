@@ -60,7 +60,7 @@ export const SETTLE_FRAME_STATE_GAS = 550_000n;
 // withdrawal leaves withdrawalCredit. These remain the declared limits
 // when the wallet does emit the default claim. Custom tails declare their
 // own budgets inside remaining transaction capacity. On native ethrex
-// commit 247e2dd2, a DEFAULT claim to a new EOA used 14,716 execution gas
+// commit 247e2dd2, a DEFAULT claim to a new EOA used 14,738 execution gas
 // and 183,600 state gas.
 export const CLAIM_FRAME_GAS = 100_000n;
 export const CLAIM_FRAME_STATE_GAS = 183_600n;

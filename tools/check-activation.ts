@@ -3,7 +3,9 @@
  * (production: false) passes only with --allow-testbed. A production manifest needs at least
  * two phase-2 contributions, a count the proving key must record, independent_verification set
  * to true, and --ptau naming the phase-1 file whose SHA-256 the manifest pins and against which
- * snarkjs verifies the proving key.
+ * snarkjs verifies the proving key. Every profile field is checked: the frame limits and EIP
+ * revisions against this tree's dispatcher profile, and the gas evidence against the figures in
+ * tools/check-gas-profile.ts, which the deploy script runs too.
  *
  *   node tools/check-activation.ts MANIFEST [--allow-testbed] [--ptau PATH]
  */
@@ -17,6 +19,7 @@ import { CheckError } from "../src/errors.ts";
 import * as gas from "../src/gas.ts";
 import { canonical, stringify } from "../src/json.ts";
 import { check, field, get, object, parseInOrder, readText, ROOT } from "./check.ts";
+import * as measured from "./check-gas-profile.ts";
 
 // The one profile this tree can activate. The dispatcher pins the settlement limits; the
 // validation limits and the claim frame's limits are the wallet defaults in src/gas.ts. A
@@ -33,7 +36,35 @@ const EXPECTED_PROFILE = {
   spend_signatures: gas.SPEND_SIGNATURES,
   settle_frame_gas: gas.SETTLE_FRAME_GAS,
   settle_frame_state_gas: gas.SETTLE_FRAME_STATE_GAS,
+  // The EIP revisions the dispatcher implements, and EIP-8141's public-mempool verify gas.
+  eip_8250_merge: "f3079a09e8c606afcb0e5e1a309ff228b88dc067",
+  eip_8272_pin: "824cbc0b0e",
+  eip_8272_carrier: "canonical-verifier-frame",
+  eip_8141_public_mempool_budget: 100_000n,
 };
+
+// The gas evidence: what tools/check-gas-profile.ts measured on native ethrex or derived from
+// those measurements, and checks against the frame limits. The manifest records the same
+// figures, so it cannot carry evidence that no check has seen.
+const EXPECTED_EVIDENCE = {
+  pre_pr_12279_max_observed_verify_execution_gas:
+    measured.PRE_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS,
+  post_pr_12279_max_observed_verify_execution_gas:
+    measured.POST_PR_12279_MAX_OBSERVED_VERIFY_EXECUTION_GAS,
+  max_observed_recent_root_frame_gas: measured.MAX_OBSERVED_RECENT_ROOT_FRAME_GAS,
+  conservative_settle_bound: measured.CONSERVATIVE_SETTLEMENT_EXECUTION_BOUND,
+  conservative_settle_state_bound: measured.CONSERVATIVE_SETTLEMENT_STATE_BOUND,
+};
+
+// Every profile field is checked, so "profile": "match" covers the whole profile.
+const PROFILE_FIELDS = new Set([
+  "wire_profile",
+  "required_verify_budget",
+  "hegota_profile_2_budget",
+  "chain_id",
+  ...Object.keys(EXPECTED_PROFILE),
+  ...Object.keys(EXPECTED_EVIDENCE),
+]);
 
 // Every active artifact must be pinned, or a manifest that omits one passes without its hash
 // being checked. check-forge-config.ts checks the settings forge resolves beyond foundry.toml.
@@ -283,11 +314,16 @@ export function checkActivation(
 
   const profile = object(field(manifest, "profile", "the manifest"), "profile");
   const read = (key: string) => field(profile, key, "profile");
+  // Gas and the chain ID are counts: a negative, fractional or infinite value (1e400 parses as
+  // Infinity) is refused before any comparison.
   const number = (key: string) => {
     const value = read(key);
-    if (!isNumber(value)) throw new CheckError(`${key} must be a JSON number`);
+    if (typeof value !== "bigint" || value < 0n) {
+      throw new CheckError(`${key} must be a nonnegative JSON integer`);
+    }
     return value;
   };
+  for (const key of profile.keys()) check(PROFILE_FIELDS.has(key), `unknown profile field: ${key}`);
   const wire = read("wire_profile");
   check(wire === gas.POOL_PROFILE, `unsupported transaction wire profile: ${stringify(wire)}`);
   for (const [key, value] of Object.entries(EXPECTED_PROFILE)) {
@@ -303,18 +339,9 @@ export function checkActivation(
   if (gas.REQUIRED_VERIFY_BUDGET > number("hegota_profile_2_budget")) {
     throw new CheckError("transaction exceeds the configured Hegota Profile 2 budget");
   }
-  // The VERIFY execution measured on this dispatcher (native ethrex 247e2dd2, after PR 12279
-  // stopped charging keyed-nonce creation as execution) must fit the default.
-  const measured = "post_pr_12279_max_observed_verify_execution_gas";
-  check(profile.has(measured), "missing PR 12279 VERIFY execution measurement status");
-  if (number(measured) >= gas.VERIFY_FRAME_GAS) {
-    throw new CheckError("VERIFY frame does not cover the historical valid path");
-  }
-  if (number("conservative_settle_bound") >= gas.SETTLE_FRAME_GAS) {
-    throw new CheckError("settlement frame does not cover the conservative fork bound");
-  }
-  if (number("conservative_settle_state_bound") >= gas.SETTLE_FRAME_STATE_GAS) {
-    throw new CheckError("settlement frame does not cover the conservative state bound");
+  check(number("chain_id") > 0n, "chain_id must be a positive JSON integer");
+  for (const [key, value] of Object.entries(EXPECTED_EVIDENCE)) {
+    if (number(key) !== value) throw new CheckError(`${key} differs from check-gas-profile.ts`);
   }
 
   // Truthiness would read the JSON string "false" as true, so require real types, and take

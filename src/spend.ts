@@ -2,10 +2,11 @@
  * A fixture's shield and spend entries as the pool's calldata, and the frame transaction that
  * carries a spend. A spend is VERIFY(0x…8272, recent-root tuple) -> VERIFY(pool, proof) ->
  * SENDER(pool, settle(Spend) || notes), plus at most one DEFAULT tail; the pool pays, and its
- * nonce keys are the nullifiers. It carries two signatures: the owner's over the spend's EIP-712
- * intent, which the fixture records, then the signature of the authorizer the proof selects over
- * the whole transaction, the owner's signature included. Nothing here asks the node:
- * src/deployment.ts checks a spend's recent root against it, and src/send.ts sends the spend.
+ * nonce keys are the nullifiers. It carries two signatures, in this order: the authorizer's, which
+ * the proof selects, over the whole transaction with the owner's signature bytes; then the
+ * owner's, over the spend's EIP-712 intent, which the fixture records before the authorizer signs.
+ * Nothing here asks the node: src/deployment.ts checks a spend's recent root against it, and
+ * src/send.ts sends the spend.
  */
 import {
   concat,

@@ -173,9 +173,14 @@ const verify = (chain: ChainReader, receipt: unknown) =>
     if (pool !== POOL) throw new ReceiptError("the receipt names another pool than the config");
   });
 
-function exportFor(chain: ChainReader, fixture: unknown, only?: bigint[], addressWide = false) {
+/** The receipt, and how many of the fixture's notes it leaves out. */
+function exported(chain: ChainReader, fixture: unknown, only?: bigint[], addressWide = false) {
   const chosen = only === undefined ? null : new Set(only);
   return exportReceipt(chain, CHAIN, POOL, fixture, chosen, { addressWide });
+}
+
+async function exportFor(chain: ChainReader, fixture: unknown, only?: bigint[], wide = false) {
+  return (await exported(chain, fixture, only, wide)).receipt;
 }
 
 function refusal(expected: string, kind: typeof UserError = ReceiptError) {
@@ -327,9 +332,15 @@ test("export fails on a consumed spend the node's logs miss and skips one never 
   const gap = chain.copy();
   gap.unindexed.add("0xtransfer");
   await assert.rejects(exportFor(gap, fixture, [cm.a]), refusal("logs do not show"));
-  // A spend the fixture holds but that was never sent consumed nothing: its dummy is left out.
+  // Bob's note, which the hidden transfer created and the fixture never spends, looks like a note
+  // never created, so naming it is refused rather than left out of the receipt.
+  await assert.rejects(exportFor(gap, fixture, [cm.b]), refusal("not in this node's logs"));
+  await assert.rejects(exportFor(chain, fixture, [cm.e]), refusal("the fixture does not open"));
+  // A spend the fixture holds but that was never sent consumed nothing: its dummy is left out of
+  // a receipt for every note, which counts it.
   const unsent = { epoch: 0, inputs: [{ ...op("d1"), nk: hex32(1n) }] };
-  assert.deepEqual(await exportFor(chain, { ...fixture, unsent }, undefined, true), receipt);
+  const all = await exported(chain, { ...fixture, unsent }, undefined, true);
+  assert.deepEqual(all, { receipt, skipped: 1 });
 });
 
 test("what a receipt shows about origins, completeness and positions", async () => {
