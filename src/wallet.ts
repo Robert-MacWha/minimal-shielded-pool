@@ -115,9 +115,9 @@ export class Tree implements MerkleTree {
 
 /**
  * The native generator's pool near capacity: `count` copies of `cm`, followed by the commitments
- * `extras`. The copies stand in for the deposits before the extras and share one nullifier.
- * Subtrees of the repeated commitment are equal, so the hasher keeps each answer and only the
- * few distinct nodes are hashed.
+ * `extras`. The copies stand in for the deposits before the extras. Subtrees of the repeated
+ * commitment are equal, so the hasher keeps each answer and only the few distinct nodes are
+ * hashed.
  */
 export class RepeatedTree extends Tree {
   constructor(cm: bigint, count: bigint, extras: readonly bigint[] = []) {

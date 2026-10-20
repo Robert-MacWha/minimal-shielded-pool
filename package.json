@@ -14,7 +14,7 @@
   "dependencies": {
     "@noble/curves": "2.4.0",
     "@noble/hashes": "2.4.0",
-    "@skew-mmr/circuits": "0.3.0",
+    "@skew-mmr/circuits": "0.4.1",
     "@skew-mmr/contracts": "0.2.0",
     "@skew-mmr/core": "0.3.0",
     "circom2": "0.2.8",

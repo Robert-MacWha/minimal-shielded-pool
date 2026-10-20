@@ -1,6 +1,6 @@
 /**
  * The spend circuit, with real witnesses against the committed artifacts and one real Groth16
- * proof: duplicates of one commitment at different positions share a nullifier, the committed
+ * proof: duplicates of one commitment at different positions get distinct nullifiers, the committed
  * R1CS (not only the WASM's runtime asserts) rejects every broken witness, including an owner
  * outside the owner set, an empty leaf as the owner, and a non-boolean path bit that would place
  * any address under the set's root, beta and gamma are constrained, assertUnprovable (the smoke
@@ -325,7 +325,7 @@ const later = treeOf([...tree.leaves, pr.commitment(...newNote(rng), 29n)]);
 const otherCm = pr.commitment(...newNote(rng), 37n);
 const [branchA, branchB] = [treeOf([cm, otherCm]), treeOf([otherCm, cm])];
 // The third append merges the first two notes, so the note at index 0 has otherCm beside it. In
-// `tree` its sibling is its own copy, so the other branch opens the copy and the same nullifier.
+// `tree` its sibling is its own copy, so the other branch opens the copy, a note of its own.
 const merged = treeOf([cm, otherCm, cm]);
 const transferOutputs = [60n, 40n].map((value): pr.Output => [pr.inner(...newNote(rng)), value]);
 // Two funded inputs of 2^128 - 1 and 1, and an output that takes all but 1 of them.
@@ -351,7 +351,7 @@ function spend(
 
 const [first, firstStmt] = spend([real, dummy]);
 const [second, secondStmt] = spend([duplicate, dummy]);
-const [pair] = spend([real, duplicate]);
+const [pair, pairStmt] = spend([real, duplicate]);
 // The same input epoch, commitment and position on a later root; the publication slot is
 // intentionally absent.
 const [laterFirst, laterStmt] = spend([real, dummy], later);
@@ -362,6 +362,12 @@ const [otherEpoch, otherEpochStmt] = spend([real, dummy], later, domain1);
 // spends it at that index, which is `duplicate`'s opening, before reproving.
 const [rebuilt, rebuiltStmt] = spend([duplicate, dummy], branchB);
 const [dummyPair, dummyStmt] = spend([real, { nk, rho, value: 0n, idx: null }], later);
+// A dummy's opening is not checked, so it may name any tree and path, and its index is still 0.
+const anyOpening = edited(dummyPair, (w) => {
+  w.in_tree[1] = "1";
+  w.in_path_len[1] = "2";
+  w.in_path_right[1] = w.in_path_right[1].map(() => "1");
+});
 // Any leaf of the owner set may sign; leaf 2 takes the other branch at height 1.
 const [lastOwner, lastOwnerStmt] = spend([real, dummy], tree, domain0, OWNERS.leaf(2));
 
@@ -483,10 +489,12 @@ test("assertUnprovable counts only an in-circuit assertion as a refusal", async 
 const ACCEPTED: Record<string, [Witness, bigint[]]> = {
   "first-occurrence": [first, firstStmt],
   "identical-second-occurrence": [second, secondStmt],
+  "both-identical-funded-occurrences": [pair, pairStmt],
   "same-occurrence-later-root": [laterFirst, laterStmt],
   "same-position-other-authenticated-epoch": [otherEpoch, otherEpochStmt],
   "reorg-rebuilt-tree-and-index": [rebuilt, rebuiltStmt],
   "dummy-same-secret-and-position": [dummyPair, dummyStmt],
+  "dummy-arbitrary-opening": [anyOpening, dummyStmt],
   "another-owner-of-the-set": [lastOwner, lastOwnerStmt],
 };
 for (const [name, [witness, stmt]] of Object.entries(ACCEPTED)) {
@@ -495,7 +503,7 @@ for (const [name, [witness, stmt]] of Object.entries(ACCEPTED)) {
 
 test("every note opens at its index, through every merge", async () => {
   // Every note of a 40-note MMR, whose trees reach rank 3 and whose appends merge and push in
-  // turn, opens against the frontier with the nullifier of its commitment.
+  // turn, opens against the frontier with the nullifier of its position.
   const own = seededRng(20261011n);
   const notes = Array.from({ length: 40 }, (_, i): pr.SpendInput => {
     const [nk, rho] = newNote(own);
@@ -509,21 +517,21 @@ test("every note opens at its index, through every merge", async () => {
   }
 });
 
-test("the accepted cases' nullifiers follow the commitment and epoch, not the position", () => {
+test("the accepted cases' nullifiers follow the position and epoch, not the frontier", () => {
   // statement[0] and [1] are the nullifiers, and statement[10] on the frontier.
-  assert.equal(secondStmt[0], firstStmt[0], "identical-second-occurrence");
+  assert.notEqual(secondStmt[0], firstStmt[0], "identical-second-occurrence");
+  const both = [firstStmt[0], secondStmt[0]];
+  assert.deepEqual(pairStmt.slice(0, 2), both, "both-identical-funded-occurrences");
   assert.notDeepEqual(laterStmt.slice(10), firstStmt.slice(10), "same-occurrence-later-root: root");
   assert.deepEqual(laterStmt.slice(0, 2), firstStmt.slice(0, 2), "same-occurrence-later-root");
   assert.notEqual(otherEpochStmt[0], laterStmt[0], "same-position-other-authenticated-epoch");
-  assert.equal(rebuiltStmt[0], firstStmt[0], "reorg-rebuilt-tree-and-index");
+  assert.notEqual(rebuiltStmt[0], firstStmt[0], "reorg-rebuilt-tree-and-index");
   assert.notEqual(dummyStmt[0], dummyStmt[1], "dummy-same-secret-and-position");
 });
 
 type Rejected = [name: string, witness: Witness, variant?: Variant];
 const REJECTED: Rejected[] = [
   ["same-occurrence-twice", twice],
-  // Two insertions of one commitment share a nullifier, so they cannot be spent together.
-  ["both-identical-funded-occurrences", pair],
   [
     "same-output-twice-in-one-spend",
     edited(wide, (w) => {

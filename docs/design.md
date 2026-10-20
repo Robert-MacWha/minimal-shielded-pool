@@ -59,23 +59,26 @@ BabyJubJub in the circuit would also keep the key off the prover, at about the
 same circuit cost and with reusable keys, but only sideloaded device apps sign
 it, while stock hardware wallets and threshold signers sign EIP-712.
 
-## Nullifiers bind the commitment
+## Nullifiers bind the position
 
-The nullifier binds a note's epoch and commitment, not its position:
+The nullifier binds a note's epoch and its index, its position in the epoch's
+MMR in insertion order:
 
 ```text
-nf = Poseidon3(4, Poseidon2(D, nk), cm)
+nf = Poseidon3(4, Poseidon2(D, nk), Poseidon2(cm, index))
 ```
 
 Here `D` hashes the chain ID, the pool and the epoch of the root the spend
-proves against. Two insertions of the same commitment in one epoch share a
-nullifier, so only one of them can be spent. Wallets draw a fresh `rho` for
-every note, so commitments repeat only by mistake. Settlement still appends a
+proves against. `SkewMmrInclusion` derives the index from the note's opening,
+from the sizes of the older trees and the path's turns, so the prover cannot
+choose it, and it stays fixed as later appends merge trees. Two insertions of
+the same commitment are therefore separate notes, each spendable once, and a
+sender who repeats a commitment by mistake loses nothing. Settlement appends a
 duplicate output rather than refusing it: a refusal after approval would burn
-the spend's inputs, the reason PR 14 removed the commitment registry. The
-commitment carries the value, so a zero-value dummy input, whose tree
-membership is not checked, cannot copy a funded note's nullifier. A new
-nullifier formula needs a fresh deployment.
+the spend's inputs, the reason PR 14 removed the commitment registry. A
+zero-value dummy input, whose membership is not checked, takes index 0, and
+the commitment carries the value, so a dummy cannot copy a funded note's
+nullifier. A new nullifier formula needs a fresh deployment.
 
 The tree is a skew-MMR from the `@skew-mmr` packages: a frontier of at most
 `MAX_TREES` perfect trees, where every node holds a note and an append takes at

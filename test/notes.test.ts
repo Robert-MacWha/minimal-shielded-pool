@@ -148,8 +148,8 @@ function paid(ownerPk: bigint, channel: n.Outgoing, value: bigint) {
 }
 type Paid = ReturnType<typeof paid>;
 
-function nullifierOf(keys: n.WalletKeys, cm: bigint, epoch = 0n): bigint {
-  return nullifier(domainScalar(CHAIN, POOL, epoch), keys.nk, cm);
+function nullifierOf(keys: n.WalletKeys, cm: bigint, index: bigint, epoch = 0n): bigint {
+  return nullifier(domainScalar(CHAIN, POOL, epoch), keys.nk, cm, index);
 }
 
 /** Bob shields, pays Alice four ways and withdraws; Carol pays Alice, then Bob. */
@@ -165,7 +165,7 @@ function story(): Chain {
   const toAlice = n.openChannel(ALICE.address().hex());
   let payee = paid(ALICE.ownerPk, toAlice, ETH);
   let change = paid(BOB.ownerPk, bobSelf, 4n * ETH - FEE);
-  pay(payee, change, [nullifierOf(BOB, bobLeaf.cm), 1n]); // with a dummy's nullifier
+  pay(payee, change, [nullifierOf(BOB, bobLeaf.cm, bobLeaf.index), 1n]); // with a dummy's nullifier
   assert.deepEqual(toAlice.ciphertext, payee.ciphertext);
   assert.equal(toAlice.nextIndex, 1n);
   // Until that payment is final, the channel takes no other payment. The next payment's outputs
@@ -309,7 +309,7 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   assert.deepEqual([alice, bob, carol].map(kemChannels), [3, 1, 0]);
   // Each note's nullifier is the circuit's, for a later spend.
   for (const s of [alice, bob]) {
-    for (const r of s.notes.values()) assert.equal(r.nullifier, nullifierOf(s.keys, r.cm));
+    for (const r of s.notes.values()) assert.equal(r.nullifier, nullifierOf(s.keys, r.cm, r.index));
   }
   // A note in a later epoch takes that epoch's domain, and one published twice in an event is
   // found once.
@@ -324,14 +324,19 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   const lateScanner = Scanner.fromJson(ALICE, parse(stringify(fullEpoch0)));
   const lateFound = lateScanner.scan(twice);
   assert.equal(lateFound.length, 1);
-  assert.equal(lateFound[0].nullifier, nullifierOf(ALICE, late.cm, 1n));
-  // A later copy of that commitment in the epoch shares its nullifier, so it is not counted,
-  // and spending one leaves nothing unspent.
+  assert.equal(lateFound[0].nullifier, nullifierOf(ALICE, late.cm, 0n, 1n));
+  // A later copy of that commitment in the epoch is a note of its own, with its own nullifier,
+  // so spending one leaves the other unspent.
   const copy = { ...twice, block: 2n, leaves: [{ ...leaf, index: 1n }] };
-  assert.equal(lateScanner.scan(copy).length, 0);
+  const copyFound = lateScanner.scan(copy);
+  assert.equal(copyFound.length, 1);
+  assert.equal(copyFound[0].nullifier, nullifierOf(ALICE, late.cm, 1n, 1n));
   const spendLate = { block: 3n, tx: 0n, call: 0, notes: new Uint8Array(), leaves: [] };
   lateScanner.scan({ ...spendLate, spent: [lateFound[0].nullifier] });
-  assert.equal(lateScanner.unspent().length, 0);
+  assert.deepEqual(
+    lateScanner.unspent().map((r) => r.index),
+    [1n],
+  );
   // A direct secret past the gap stays hidden until the wallet looks further.
   const near = recover(ALICE, chain.events, { gap: 3 });
   assert.ok(!values(near).includes(ETH / 5n));
@@ -598,8 +603,7 @@ test("a ciphertext that lands twice opens one channel", () => {
   }
   const scanner = recover(ALICE, chain.events);
   assert.equal(scanner.incoming.filter((i) => i.kind === "kem").length, 1);
-  // The two copies share a nullifier, so only one can be spent and only one is counted.
-  assert.equal(scanner.notes.size, 1);
+  assert.equal(scanner.notes.size, 2);
 });
 
 test("channels: one ciphertext per transaction, a bounded window, and late payments found", () => {
@@ -679,12 +683,12 @@ test("hidden calls: calls left out of eth_getLogs are rebuilt from receipts or c
   const revertedSpend = {
     notes: n.spendNotes(dummy(), dummy()),
     leaves: [],
-    spent: [nullifierOf(ALICE, first.cm), 14n],
+    spent: [nullifierOf(ALICE, first.cm, first.index), 14n],
   };
   // Alice spends her direct payment in full: a settlement with no leaf. Left out of the logs,
   // it leaves no gap, so her note still shows as unspent.
   const [direct] = chain.events[3].leaves;
-  chain.add(n.spendNotes(dummy(), dummy()), [], [nullifierOf(ALICE, direct.cm), 13n]);
+  chain.add(n.spendNotes(dummy(), dummy()), [], [nullifierOf(ALICE, direct.cm, direct.index), 13n]);
   const bobShield = paid(BOB.ownerPk, n.directChannel(BOB.ownerPk, BOB.selfSecret), ETH);
   chain.add(n.shieldNotes(bobShield.note), [bobShield.cm], [], SHIELD);
   const aliceNotes = new Map([ETH, ETH / 2n, ETH / 5n, 2n * ETH, ETH / 10n].map((v) => [v, false]));

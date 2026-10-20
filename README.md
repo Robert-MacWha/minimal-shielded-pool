@@ -155,20 +155,23 @@ authorizer address, and a recipient exactly when `publicAmount` is positive. A
 zero-value output must use a fixed "sink" commitment for its position, which
 the pool never inserts.
 
-The nullifier binds a note's epoch and commitment, so two insertions of the
-same commitment in one epoch can be spent only once between them. Wallets draw
-a fresh `rho` for every note, so commitments repeat only by mistake:
+Every note is identified by its epoch and its index, its position in the
+epoch's MMR in insertion order. The nullifier binds that position, so two notes
+with the same commitment are spent independently and no uniqueness registry is
+needed:
 
 ```text
 D  = keccak256(domain_tag || chain_id || pool || epoch) mod r
-nf = Poseidon3(4, Poseidon2(D, nk), cm)
+nf = Poseidon3(4, Poseidon2(D, nk), Poseidon2(cm, index))
 ```
 
 Here `domain_tag = keccak256("minimal-shielded-pool:occurrence-domain:v1")`,
 each field is 32 bytes and `r` is the BN254 scalar field order. The pool
 checks that `D` uses the epoch of the root the spend proves against, so each
-note has exactly one nullifier. Wallets still track where each note sits, to
-open it, and rebuild the tree after a reorg.
+note has exactly one nullifier. The circuit derives the index from the note's
+opening in the MMR, and it stays fixed as the MMR grows. A zero-value dummy
+input, whose membership is not checked, takes index 0. Wallets must track notes
+by position and rebuild positions after a reorg.
 
 ## Transactions
 

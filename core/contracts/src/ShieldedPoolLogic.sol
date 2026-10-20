@@ -238,8 +238,8 @@ contract ShieldedPoolLogic {
             revert InvalidSettlementShape();
         }
         // Each output other than a sink becomes a new note, even when the MMR already holds
-        // the same commitment. Nullifiers bind the note's epoch and commitment, so the two
-        // can be spent only once between them.
+        // the same commitment: nullifiers bind the note's epoch and index, so the two are
+        // separate notes.
 
         emit NoteSpent(s.nf1);
         emit NoteSpent(s.nf2);

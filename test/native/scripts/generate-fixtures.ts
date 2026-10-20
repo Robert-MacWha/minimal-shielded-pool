@@ -447,40 +447,31 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   const addCase = (name: string, transactions: Step[], setup?: Step[]) =>
     void cases.push(setup ? { name, transactions, setup } : { name, transactions });
 
-  // Two identical deposits share a nullifier, so only one of them can be withdrawn.
+  // Two identical deposits are independently funded and independently withdrawn.
   const dupTree = treeOf(NA.cm, NB.cm, NA.cm);
   const dup0 = await proveSpend("deposit-copy-first", dupTree, NA, 0n, { rootSlot: 101n });
   const dup2 = await proveSpend("deposit-copy-second", dupTree, NA, 2n, { rootSlot: 101n });
-  assert(dup0.nf1 === dup2.nf1, "duplicate deposits have two nullifiers");
-  addCase("identical-funded-deposits-withdrawn-once", [
+  assert(dup0.nf1 !== dup2.nf1, "duplicate deposits share a nullifier");
+  addCase("identical-funded-deposits-both-withdrawn", [
     deposit("deposit-a-again", NA, NEXT, dupTree, 101n),
     publish("publish-duplicates", NEXT + 1n, 0n, 101n),
     spend("withdraw-first-deposit", dup0, { slot: 102n, paid: ETH - FEE }),
-    spend("withdraw-second-deposit", dup2, {
-      slot: 103n,
-      rejected: true,
-      keys: keySlots(dup2, 1n, 0n),
-    }),
+    spend("withdraw-second-deposit", dup2, { slot: 103n, paid: 2n * (ETH - FEE) }),
   ]);
 
-  // Private settlement may create a commitment that already exists. Settlement appends it, and
-  // the two share a nullifier.
+  // Private settlement may create a commitment that already exists; both survive.
   const copyOutputs: protocol.Output[] = [[NB.inner, NB.value], protocol.sinkOutputs()[1]];
   const duplicate = await proveSpend("private-duplicate", BASE, NA, 0n, { outputs: copyOutputs });
   const privateTree = treeOf(NA.cm, NB.cm, NB.cm);
   const b1 = await proveSpend("private-copy-original", privateTree, NB, 1n, { rootSlot: 102n });
   const b2 = await proveSpend("private-copy-new", privateTree, NB, 2n, { rootSlot: 102n });
-  assert(b1.nf1 === b2.nf1, "duplicate outputs have two nullifiers");
+  assert(b1.nf1 !== b2.nf1, "duplicate outputs share a nullifier");
   const transfer = { pool: slots(...mmrWords(privateTree)) };
-  addCase("private-duplicate-output-withdrawn-once", [
+  addCase("private-duplicate-output-both-withdrawn", [
     spend("create-private-copy", duplicate, transfer),
     publish("publish-private-copy", NEXT, 0n, 102n),
     spend("withdraw-original-private", b1, { slot: 103n, paid: NB.value - FEE }),
-    spend("withdraw-created-private", b2, {
-      slot: 104n,
-      rejected: true,
-      keys: keySlots(b2, 1n, 0n),
-    }),
+    spend("withdraw-created-private", b2, { slot: 104n, paid: 2n * (NB.value - FEE) }),
   ]);
 
   // Different roots/slots do not turn the same occurrence into a new spend.
@@ -524,7 +515,7 @@ async function generateFixtures(cacheOnly: boolean): Promise<void> {
   const branchB = treeOf(NA.cm, NB.cm, ND.cm, NC.cm);
   const old = await proveSpend("reorg-old-branch", branchA, NC, 2n, { rootSlot: 101n });
   const rebuilt = await proveSpend("reorg-new-branch", branchB, NC, 3n, { rootSlot: 101n });
-  assert(old.nf1 === rebuilt.nf1, "reordered deposits have two nullifiers");
+  assert(old.nf1 !== rebuilt.nf1, "reordered deposits share a nullifier");
   // The current root and frontier, which the dispatcher accepts, so the proof check refuses it.
   const frontierOf = ({ root, count, packed_ranks, depth, frontier }: Entry) => ({
     root,

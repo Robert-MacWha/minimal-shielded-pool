@@ -77,7 +77,7 @@ export function commitment(pk: bigint, rho: bigint, value: bigint): bigint {
 }
 
 /**
- * The domain key p2(domain, nk). With a note's commitment, it finds when the note is spent in that
+ * The domain key p2(domain, nk). With a note's position, it finds when the note is spent in that
  * epoch's domain, so disclosure receipts publish it and never nk.
  */
 export function domainKey(domain: bigint, nk: bigint): bigint {
@@ -85,16 +85,20 @@ export function domainKey(domain: bigint, nk: bigint): bigint {
 }
 
 /**
- * A note's nullifier from its key. It binds the commitment and not the note's index, so two
- * deposits of one commitment in an epoch share a nullifier and only one can be spent.
+ * A note occurrence's nullifier from its domain key. The index, the note's position in its
+ * epoch's MMR in insertion order, is hashed in, so two deposits of one commitment are spent
+ * independently.
  */
-export function nullifierFromKey(key: bigint, cm: bigint): bigint {
-  return tagged(TAG_OCCURRENCE_NULL, key, cm);
+export function nullifierFromKey(key: bigint, cm: bigint, index: bigint): bigint {
+  if (index < 0n || index >= TREE_CAPACITY) {
+    throw new InputError("note index outside the epoch's MMR");
+  }
+  return tagged(TAG_OCCURRENCE_NULL, key, p2(cm, index));
 }
 
-/** A note's nullifier in the domain of the epoch it was appended to. */
-export function nullifier(domain: bigint, nk: bigint, cm: bigint): bigint {
-  return nullifierFromKey(domainKey(domain, nk), cm);
+/** A note occurrence's nullifier in the domain of the epoch it was appended to. */
+export function nullifier(domain: bigint, nk: bigint, cm: bigint, index: bigint): bigint {
+  return nullifierFromKey(domainKey(domain, nk), cm, index);
 }
 
 export const DOMAIN_TAG = keccak(utf8("minimal-shielded-pool:occurrence-domain:v1"));
@@ -180,7 +184,10 @@ export function sinkCommitments(): bigint[] {
   return outputCommitments(sinkOutputs());
 }
 
-/** The nullifiers of inputs in the owner set with root ownerRoot, in order. */
+/**
+ * The nullifiers of inputs in the owner set with root ownerRoot, in order. A zero-value input is
+ * never in the MMR, so the circuit gives it index 0.
+ */
 export function inputNullifiers(
   domain: bigint,
   ownerRoot: bigint,
@@ -188,7 +195,7 @@ export function inputNullifiers(
 ): bigint[] {
   return inputs.map((i) => {
     const cm = commitment(ownerPk(ownerRoot, i.nk), i.rho, i.value);
-    return nullifier(domain, i.nk, cm);
+    return nullifier(domain, i.nk, cm, i.value === 0n || i.idx === null ? 0n : i.idx);
   });
 }
 

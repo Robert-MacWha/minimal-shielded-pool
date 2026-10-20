@@ -18,7 +18,9 @@ pragma circom 2.0.8;
 //     owner_pk = Poseidon(1, Q, nk)
 //     inner    = Poseidon(owner_pk, rho)     what a recipient gives a sender
 //     cm       = Poseidon(2, inner, value)   shield hashes msg.value in on chain
-//     nf       = Poseidon(4, Poseidon(domain, nk), cm)
+//     index    = the note's position in insertion order in its epoch's MMR, 0
+//                for a zero-value dummy
+//     nf       = Poseidon(4, Poseidon(domain, nk), Poseidon(cm, index))
 // The spender proves it knows Q, each input's nk, rho, value and the opening
 // of cm in the epoch's skew-MMR (@skew-mmr/circuits' SkewMmrInclusion): the
 // tree that holds it, its children and the path from it to that tree's root,
@@ -26,11 +28,11 @@ pragma circom 2.0.8;
 // keccak256(DOMAIN_TAG || chain_id || pool || epoch) mod p, and the pool
 // requires the epoch whose frontier the spend proves against. Each epoch has
 // its own MMR of at most MAX_TREES trees, and the pool starts the next epoch
-// when it lacks room. A commitment has one nullifier per epoch, so two
-// insertions of the same commitment in an epoch can be spent only once
-// between them. A fresh rho for each note keeps commitments distinct. A
-// circuit with another nullifier formula needs a fresh pool: under an existing
-// one, its spent notes would get new nullifiers and could be spent again.
+// when it lacks room. SkewMmrInclusion derives the index from the opening, and
+// it stays fixed as the MMR grows, so each insertion is a separate note with
+// exactly one nullifier, even when two hold the same commitment. A circuit
+// with another nullifier formula needs a fresh pool: under an existing one,
+// its spent notes would get new nullifiers and could be spent again.
 //
 // Statement. 12 + MAX_TREES values, in this order:
 //     [nf1, nf2, out_cm1, out_cm2, domain, public_amount, fee, recipient,
@@ -183,15 +185,20 @@ template InputNote(MAX_TREES) {
     // Membership only for a note with value: a zero-value input may be a dummy.
     (1 - member.valid) * value === 0;
 
-    // The domain carries the input's epoch. cm carries the value, so a zero-value dummy,
-    // whose membership is not checked, cannot copy a funded note's nullifier with its key.
+    // The domain carries the input's epoch and the index its insertion, so each funded
+    // insertion has one nullifier. A zero-value dummy, whose membership is not checked, takes
+    // index 0, and cm stays in so that it cannot copy a funded note's nullifier with its key
+    // and index.
     component domainKey = Poseidon(2);
     domainKey.inputs[0] <== domain;
     domainKey.inputs[1] <== nk;
+    component occurrence = Poseidon(2);
+    occurrence.inputs[0] <== leaf.out;
+    occurrence.inputs[1] <== member.valid * member.index;
     component null = Poseidon(3);
     null.inputs[0] <== 4;
     null.inputs[1] <== domainKey.out;
-    null.inputs[2] <== leaf.out;
+    null.inputs[2] <== occurrence.out;
     nf <== null.out;
 }
 

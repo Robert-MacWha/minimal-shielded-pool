@@ -135,7 +135,9 @@ function story(sharedKey = false, aliceKey?: bigint, dummyKey?: bigint) {
   const valueOf = (k: Name) => (k in values ? values[k as keyof typeof values] : 0n);
   const pk = (k: Name) => pr.ownerPk(OWNER_ROOT, notes[k][0]);
   const cm = byName((k) => pr.commitment(pk(k), notes[k][1], valueOf(k)));
-  const nf = byName((k) => pr.nullifier(D, notes[k][0], cm[k]));
+  // Each input's nullifier is at its leaf: b at 1, c at 2, and a and the dummy d notes at 0.
+  const at: Partial<Record<Name, bigint>> = { b: 1n, c: 2n };
+  const nf = byName((k) => pr.nullifier(D, notes[k][0], cm[k], at[k] ?? 0n));
   const base = { root: 1n, rootSlot: 5n, epoch: 0n, domain: D, authorizer: 0xaaaan };
   const frontier = {
     count: 1n,
@@ -243,6 +245,7 @@ test("an honest receipt traces the deposit through the transfer to the withdrawa
 });
 
 test("an altered note is rejected", async (t) => {
+  const keyA = noteOf(receipt, "a").nullifierKey;
   const cases: [Name, Record<string, unknown>, string, string?][] = [
     ["a", { nullifierKey: hex32(12345n) }, "not one 0xtransfer spent"],
     ["a", { index: 1n }, "did not create it"],
@@ -253,6 +256,8 @@ test("an altered note is rejected", async (t) => {
     ["a", { epoch: 1n, created: "0xdep_epoch1" }, "spends epoch 0, not 1"],
     ["a", { spent: "0xwithdraw" }, "not one 0xwithdraw spent"],
     ["a", { created: "0xdep3" }, "did not create it"],
+    // A copy of the same commitment at another leaf has a nullifier of its own.
+    ["a", { index: 3n, created: "0xdep3", nullifierKey: keyA }, "not one 0xtransfer spent"],
     ["d1", { value: "1" }, "opening does not match"],
     ["d1", {}, "a dummy input has value 0 and a spend", "spent"],
     // A dummy's index is not in the tree, but it must still be one the tree could hold.

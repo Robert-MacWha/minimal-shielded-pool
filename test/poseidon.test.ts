@@ -39,21 +39,22 @@ test("the pool's hash chain matches circomlibjs", () => {
   const pk = tagged(TAG_PK, c.owner_root, c.nk);
   const inner = p2(pk, c.rho);
   const cm = tagged(TAG_LEAF, inner, c.value);
-  // The domain includes the input epoch. The tag is the literal 4, as in spend.circom, so the
-  // check does not rest on the library's own constant.
-  const nf = (leaf: bigint) => tagged(4n, p2(c.domain, c.nk), leaf);
+  // The domain includes the input epoch, and the index distinguishes independently funded
+  // occurrences of the same commitment; a dummy takes index 0. The tag is the literal 4, as in
+  // spend.circom, so the check does not rest on the library's own constant.
+  const nf = (leaf: bigint, index: bigint) => tagged(4n, p2(c.domain, c.nk), p2(leaf, index));
   assert.equal(pk, c.owner_pk, "owner_pk");
   assert.equal(inner, c.inner, "inner");
   assert.equal(cm, c.cm, "cm");
-  assert.equal(nf(cm), c.nf, "nf");
-  assert.equal(nf(tagged(TAG_LEAF, inner, 0n)), c.nf2, "nf2");
+  assert.equal(nf(cm, c.index), c.nf, "nf");
+  assert.equal(nf(tagged(TAG_LEAF, inner, 0n), 0n), c.nf2, "nf2");
   assert.equal(tagged(TAG_LEAF, c.out_inner1, c.out_value1), c.out_cm1, "out_cm1");
   assert.equal(tagged(TAG_LEAF, c.out_inner2, c.out_value2), c.out_cm2, "out_cm2");
   // The named helpers the wallet uses compose the same chain.
   assert.equal(protocol.ownerPk(c.owner_root, c.nk), c.owner_pk, "ownerPk()");
   assert.equal(protocol.inner(c.owner_pk, c.rho), c.inner, "inner()");
   assert.equal(protocol.commitment(c.owner_pk, c.rho, c.value), c.cm, "commitment()");
-  assert.equal(protocol.nullifier(c.domain, c.nk, c.cm), c.nf, "nullifier()");
+  assert.equal(protocol.nullifier(c.domain, c.nk, c.cm, c.index), c.nf, "nullifier()");
 });
 
 test("an owner set's root matches circomlibjs, with empty leaves 0", () => {

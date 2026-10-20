@@ -142,11 +142,13 @@ describe("protocol hashes (protocol.json)", () => {
     // The Python client derived the nullifier from the spend key as this one does from nk.
     nullifiers: [
       (c) => {
-        const { domain, sk: nk, cm } = bigs(c.in);
+        const { domain, sk: nk, cm, index } = bigs(c.in);
+        if ("error" in c) return pr.nullifier(domain, nk, cm, index);
         const key = pr.domainKey(domain, nk);
-        const fromKey = pr.nullifierFromKey(key, cm);
-        return { key, nullifier: pr.nullifier(domain, nk, cm), fromKey };
+        const fromKey = pr.nullifierFromKey(key, cm, index);
+        return { key, nullifier: pr.nullifier(domain, nk, cm, index), fromKey };
       },
+      InputError,
     ],
     // Pools as integers and as 0x + 40 hex digits.
     domains: [

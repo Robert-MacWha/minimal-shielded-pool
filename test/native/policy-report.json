@@ -8,14 +8,14 @@
   "ethrex_revision": "247e2dd2c4d4c526dcc64ac1c025bd2319e7a10e",
   "first": "policy-first.hex",
   "fixture_keccak256": {
-    "deploy-logic.hex": "0x2323c7fb708bdd207f4d1369805f3dddaae17670b8c9679f691ee2850266a1f8",
+    "deploy-logic.hex": "0x14aa51edad5d2163395216f43f070f58b231beefdbc824cb6310b6e968524e0f",
     "deploy-pool.hex": "0x57180feeb986b47a53381097f1ebadde8f6ca46cea9b3163598874abb0400adf",
     "deploy-poseidon4.hex": "0xe84e84dd84dc21ab57d71a766004bc75ce069572552a87c3134583703119e7c9",
-    "deploy-verifier.hex": "0x000360b2f542c51e59bb035c87d440d396c6a4e89cdd8eb028decab21ef99ac1",
+    "deploy-verifier.hex": "0x8eb8f0454f8da067970414d94c09a0af5b9cf745fa35719589c69d02dd0a73dd",
     "deposit-a.hex": "0x62564f009414ccdf7870e061827c1eab48586ebd14673bf9ba198922d2963237",
     "deposit-b.hex": "0x657d7fcd27e40681274d4651fd0d36feee9d35b897da7c3f5a84d1b4433400ed",
-    "policy-first.hex": "0x4e2bdaf33e5e58bd1d598a98509f014e6fbb3b2054adfc1d31269b9095096cdb",
-    "policy-second.hex": "0xfaa1381df3ca2be67967f3de1e086296369ed4113bd1e1891c117c133900e074",
+    "policy-first.hex": "0xcbb1a6d0349fdd6a87e2d9b062eebeeb5da3b3703bb5fb4a56a0030e8a7e02fc",
+    "policy-second.hex": "0xeb8a9ba759216ecbff066fd8b4aac1e4ea6b78fdc08a2287184b6faa0ea78d97",
     "publish-initial.hex": "0xd2568e4aea7586a1b7c33a5274ac939907a581ca7437276e4c342951ab02981c"
   },
   "results": [

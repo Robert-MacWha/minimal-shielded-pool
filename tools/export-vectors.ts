@@ -78,18 +78,19 @@ async function exportVectors() {
   // Drawn after the others so that their values stay as earlier vectors drew them.
   const domain = next(); // stands in for keccak(TAG||chain||pool||epoch) mod p
   const owner_root = next(); // stands in for the root of an owner set
+  const index = 37n;
   const owner_pk = p3(1n, owner_root, nk);
   const inner = p2(owner_pk, rho);
   const cm = p3(2n, inner, value);
-  // Nullifiers, mirroring core/circuits/spend.circom. Even with the same secret, a zero-value
-  // dummy has a different identity.
-  const nf = p3(4n, p2(domain, nk), cm);
-  const nf2 = p3(4n, p2(domain, nk), p3(2n, inner, 0n));
+  // Position-bound nullifiers, mirroring core/circuits/spend.circom. A zero-value dummy takes
+  // index 0, and even with the same secret it has a different identity.
+  const nf = p3(4n, p2(domain, nk), p2(cm, index));
+  const nf2 = p3(4n, p2(domain, nk), p2(p3(2n, inner, 0n), 0n));
   const out_cm1 = p3(2n, out_inner1, out_value1);
   const out_cm2 = p3(2n, out_inner2, out_value2);
   const chain = {
     ...{ owner_root, nk, rho, value, out_inner1, out_inner2, out_value1, out_value2, domain },
-    ...{ owner_pk, inner, cm, nf, nf2, out_cm1, out_cm2 },
+    ...{ index, owner_pk, inner, cm, nf, nf2, out_cm1, out_cm2 },
   };
 
   // An owner set's root at depth 16, where the leaves are addresses and empty leaves are 0.
