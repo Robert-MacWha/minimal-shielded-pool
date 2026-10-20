@@ -70,20 +70,16 @@ nf = Poseidon3(4, Poseidon2(D, nk), Poseidon2(cm, index))
 
 Here `D` hashes the chain ID, the pool and the epoch of the root the spend
 proves against. `SkewMmrInclusion` derives the index from the note's opening,
-from the sizes of the older trees and the path's turns, so the prover cannot
-choose it, and it stays fixed as later appends merge trees. Two insertions of
-the same commitment are therefore separate notes, each spendable once, and a
-sender who repeats a commitment by mistake loses nothing. Settlement appends a
-duplicate output rather than refusing it: a refusal after approval would burn
-the spend's inputs, the reason PR 14 removed the commitment registry. A
-zero-value dummy input, whose membership is not checked, takes index 0, and
-the commitment carries the value, so a dummy cannot copy a funded note's
-nullifier. A new nullifier formula needs a fresh deployment.
+so the prover cannot choose it, and it stays fixed as the MMR grows. Two
+insertions of the same commitment are therefore separate notes, with no
+uniqueness registry and no storage read during validation. A zero-value dummy
+input, whose membership is not checked, takes index 0, and the commitment
+carries the value, so a dummy cannot copy a funded note's nullifier. A new
+nullifier formula needs a fresh deployment.
 
 The tree is a skew-MMR from the `@skew-mmr` packages: a frontier of at most
 `MAX_TREES` perfect trees, where every node holds a note and an append takes at
-most one Poseidon hash. The circuit opens a note without its index, so the
-nullifier cannot bind it.
+most one Poseidon hash.
 
 ## The statement is compressed
 

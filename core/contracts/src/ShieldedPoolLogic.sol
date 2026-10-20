@@ -13,15 +13,15 @@ import {LibSkewMmrVerifier} from "skew-mmr/lib/LibSkewMmrVerifier.sol";
 /// it, and approval consumes the spend's nullifiers. A settlement that then fails burns the
 /// notes, so every refusal in settle is also made before approval (see settle).
 contract ShieldedPoolLogic {
-    /// @notice The most trees each epoch's skew-MMR holds, as in the circuit and the dispatcher.
+    /// @notice The most trees each epoch's skew-MMR holds.
     uint256 public constant MAX_TREES = 20;
-    /// @notice The notes each epoch's MMR holds, 2^(MAX_TREES + 1) - MAX_TREES - 2.
+    /// @notice The notes each epoch's MMR holds.
     uint256 public constant CAPACITY = 2 ** (MAX_TREES + 1) - MAX_TREES - 2;
     /// @dev BN254's scalar field order p, the circuit's field.
     uint256 internal constant P = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
     /// @dev Amounts are below 2^128, the circuit's range check.
     uint256 internal constant MAX_VALUE = 1 << 128;
-    /// @notice The root of the empty MMR, LibSkewMmrVerifier's commitment keccak256(0, 0, 0, 0).
+    /// @notice The root of the empty MMR, keccak256(0, 0, 0, 0).
     bytes32 public constant EMPTY_ROOT = 0x012893657d8eb2efad4de0a91bcd0e39ad9837745dec3ea923737ea803fc8e3d;
     /// @notice keccak256("minimal-shielded-pool:occurrence-domain:v1"), the first word of
     /// every nullifier domain.
@@ -40,16 +40,14 @@ contract ShieldedPoolLogic {
     /// @notice The length of the ML-KEM-768 ciphertext that a sender's first payment to a
     /// public address puts before its notes.
     uint256 public constant KEM_CIPHERTEXT_BYTES = 1088;
-    /// @dev settle(Spend) calldata is the selector, fifteen words and the frontier's MAX_TREES
-    /// words; the notes follow.
+    /// @dev settle(Spend) calldata before the notes.
     uint256 internal constant SETTLE_SPEND_BYTES = 4 + (15 + MAX_TREES) * 32;
 
     address private immutable IMPLEMENTATION_SELF = address(this);
     address public immutable POSEIDON_T4;
 
-    // The dispatcher's constructor writes EMPTY_ROOT to slot 0 and MAX_TREES to mmr.maxDepth
-    // (slot 48), so these slots must not move.
-    /// @notice The current MMR's root, the commitment to its frontier (see _insert).
+    // The dispatcher's constructor writes slots 0 and 48, so these slots must not move.
+    /// @notice The current MMR's root.
     bytes32 public currentRoot; // slot 0
     /// @notice The ETH settlement owes each recipient, which claimWithdrawal pays out.
     mapping(address => uint256) public withdrawalCredit; // slot 1
@@ -57,16 +55,11 @@ contract ShieldedPoolLogic {
     uint64 public currentEpoch; // slot 2
     /// @notice Each closed epoch's root, from when it closed.
     mapping(uint64 => bytes32) public finalRoot; // slot 3
-    /// @dev The current epoch's skew-MMR. LibSkewMmr sizes its arrays by its own MAX_TREES of
-    /// 42, so roots take slots 4 to 45, packedRanks 46, depth and count 47, maxDepth 48 and
-    /// chains 49 to 90.
+    /// @dev The current epoch's skew-MMR, laid out by LibSkewMmr.
     LibSkewMmr.State internal mmr; // slots 4..90
 
-    /// @dev settle's argument. The proof covers the statement nf1, nf2, outCm1, outCm2, domain,
-    /// publicAmount, fee, recipient, authorizer, packedRanks, depth and frontier, in that order.
-    /// root is the MMR's root that the recent-root tuple names, and the dispatcher checks that
-    /// count, packedRanks, depth and frontier open it. rootSlot and epoch name the tuple, and
-    /// the domain takes the same epoch.
+    /// @dev settle's argument. The dispatcher checks that count, packedRanks, depth and
+    /// frontier open root, the root the recent-root tuple names.
     struct Spend {
         bytes32 root;
         uint64 rootSlot;
@@ -146,14 +139,13 @@ contract ShieldedPoolLogic {
         _;
     }
 
-    /// @dev The dispatcher's constructor, not this one, stores EMPTY_ROOT and the MMR's
-    /// maxDepth.
+    /// @dev The dispatcher's constructor, not this one, initializes storage.
     constructor(address poseidonT4) {
         if (poseidonT4.code.length == 0) revert InvalidHashLibrary();
         POSEIDON_T4 = poseidonT4;
     }
 
-    /// @notice The number of notes in the current epoch's MMR, which is the next note's index.
+    /// @notice The next note's index in the current epoch's MMR.
     function nextIndex() external view returns (uint64) {
         return mmr.count;
     }
@@ -237,9 +229,8 @@ contract ShieldedPoolLogic {
         if (s.outCm1 == s.outCm2 || s.outCm1 == SINK_1 || s.outCm2 == SINK_0) {
             revert InvalidSettlementShape();
         }
-        // Each output other than a sink becomes a new note, even when the MMR already holds
-        // the same commitment: nullifiers bind the note's epoch and index, so the two are
-        // separate notes.
+        // An output becomes a new note even when the MMR already holds its commitment:
+        // nullifiers bind the note's index.
 
         emit NoteSpent(s.nf1);
         emit NoteSpent(s.nf2);
@@ -314,22 +305,19 @@ contract ShieldedPoolLogic {
         finalRoot[closed] = closedRoot;
         currentEpoch = closed + 1;
         currentRoot = EMPTY_ROOT;
-        // LibSkewMmr leaves roots and chains at or above depth undefined, so only these
-        // reset. maxDepth stays.
+        // LibSkewMmr ignores roots and chains at or above depth.
         mmr.packedRanks = 0;
         mmr.depth = 0;
         mmr.count = 0;
         emit EpochRolled(closed, closedRoot, currentEpoch);
     }
 
-    /// @dev A tree node, Poseidon(element, left, right), as the circuit hashes it.
     function _hashNode(bytes32 element, bytes32 left, bytes32 right) internal view returns (bytes32) {
         return bytes32(_hash3(uint256(element), uint256(left), uint256(right)));
     }
 
-    /// @dev Poseidon(x0, x1, x2) from PoseidonT4.hash3 (selector 0x2dbf86c6). A failed call,
-    /// a return other than one word, or an output of p or more reverts, so a faulty library
-    /// cannot put a non-canonical node in the MMR.
+    /// @dev PoseidonT4.hash3 (selector 0x2dbf86c6). Reverts unless the call returns one word
+    /// below p.
     function _hash3(uint256 x0, uint256 x1, uint256 x2) internal view returns (uint256 out) {
         (bool ok, bytes memory ret) =
             POSEIDON_T4.staticcall{gas: 200_000}(abi.encodeWithSelector(bytes4(0x2dbf86c6), x0, x1, x2));
@@ -338,9 +326,6 @@ contract ShieldedPoolLogic {
         if (out >= P) revert HashFailed();
     }
 
-    /// @dev Appends cm to the current epoch's MMR (LibSkewMmr). Returns its index and the
-    /// MMR's new root: LibSkewMmrVerifier's keccak commitment to the frontier, which the
-    /// dispatcher opens with a spend's frontier.
     function _insert(bytes32 cm) internal returns (uint64 index, bytes32 root) {
         index = mmr.count;
         root = LibSkewMmrVerifier.append(mmr, cm, _hashNode);

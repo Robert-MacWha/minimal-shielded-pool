@@ -39,9 +39,9 @@ test("the pool's hash chain matches circomlibjs", () => {
   const pk = tagged(TAG_PK, c.owner_root, c.nk);
   const inner = p2(pk, c.rho);
   const cm = tagged(TAG_LEAF, inner, c.value);
-  // The domain includes the input epoch, and the index distinguishes independently funded
-  // occurrences of the same commitment; a dummy takes index 0. The tag is the literal 4, as in
-  // spend.circom, so the check does not rest on the library's own constant.
+  // The domain includes the input epoch, and the index distinguishes copies of a commitment. The
+  // tag is the literal 4, as in spend.circom, so the check does not rest on the library's own
+  // constant.
   const nf = (leaf: bigint, index: bigint) => tagged(4n, p2(c.domain, c.nk), p2(leaf, index));
   assert.equal(pk, c.owner_pk, "owner_pk");
   assert.equal(inner, c.inner, "inner");

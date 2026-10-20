@@ -4,9 +4,7 @@ pragma solidity ^0.8.24;
 import {LibSkewMmr} from "skew-mmr/lib/LibSkewMmr.sol";
 import {ShieldedPoolLogic} from "../src/ShieldedPoolLogic.sol";
 
-// ShieldedPoolLogic's storage slots, which the tests write to set up MMR states. The MMR's
-// roots[i] is slot MMR_ROOTS_SLOT + i and chains[i] is MMR_CHAINS_SLOT + i; its depth is the
-// low byte of MMR_DEPTH_COUNT_SLOT and its count the eight bytes above.
+// ShieldedPoolLogic's storage slots, which the tests write to set up MMR states.
 uint256 constant CURRENT_ROOT_SLOT = 0;
 uint256 constant CURRENT_EPOCH_SLOT = 2;
 uint256 constant MMR_ROOTS_SLOT = 4;
@@ -179,14 +177,12 @@ contract DispatcherPoolTest {
         vm.store(target, bytes32(slot), bytes32(value));
     }
 
-    /// Writes the MMR of `count` notes: the ranks of count's skew-binary form, largest first,
-    /// as LibSkewMmr holds them, with nonzero placeholder roots and chains.
+    /// Writes the MMR of `count` notes, with placeholder roots and chains.
     function _seedMmr(address target, uint256 count) internal {
         uint256 packedRanks;
         uint256 depth;
         uint256 left = count;
         for (uint256 rank = MAX_TREES; rank > 0; rank--) {
-            // A tree of rank r holds 2^(r + 1) - 1 notes.
             uint256 size = 2 ** rank - 1;
             while (left >= size) {
                 packedRanks |= (rank - 1) << (6 * depth);
@@ -293,19 +289,13 @@ contract DispatcherPoolTest {
     }
 
     // Settlement gas. Forge charges one gas dimension, so these tests check only the
-    // settlement frame's 2,000,000 execution limit; the native suite checks the execution
-    // and state limits under ethrex. An append takes at most one Poseidon hash, so the
-    // heaviest settlements are a rollover and two merges in a row. These tests carry the
-    // largest notes the dispatcher admits, a first payment's, and run the default profile's
-    // Poseidon build, 8 to 9% cheaper per hash than the libsmall build the pool deploys and
-    // the native suite runs.
+    // settlement frame's execution limit; the native suite checks both limits under ethrex.
+    // The heaviest settlements are a rollover and two merges in a row, with the largest notes.
 
     function test_two_million_gas_covers_rollover_settlement() public {
         (LogicProxy realProxy, IPool realPool) = _realPool();
 
-        // An MMR one note short of full holds MAX_TREES - 1 trees. The settlement must
-        // finalize that epoch, reset it, append two outputs and create a fresh withdrawal
-        // credit.
+        // An MMR one note short of full.
         _seedMmr(address(realProxy), TREE_CAPACITY - 1);
         bytes32 oldRoot = bytes32(uint256(777));
         vm.store(address(realProxy), bytes32(CURRENT_ROOT_SLOT), oldRoot);
@@ -325,15 +315,12 @@ contract DispatcherPoolTest {
         require(realPool.withdrawalCredit(address(0xB0B)) == 7, "credit missing");
     }
 
-    /// Settles two merges in a row with the gas a 2,000,000 frame forwards past the
-    /// dispatcher's delegatecall: all but 1/64 (EIP-150). The MMR's smallest trees have ranks
-    /// 1 and 1, so the first output merges them into a rank-2 tree beside another, and the
-    /// second output merges those two.
+    /// Settles two merges in a row with the gas the settlement frame forwards past the
+    /// dispatcher's delegatecall (EIP-150).
     function test_forwarded_two_million_covers_two_merges() public {
         (LogicProxy realProxy, IPool realPool) = _realPool();
         vm.deal(address(realProxy), 100 ether);
-        // Trees of ranks 18 down to 2, then 1 and 1: 2^20 - 21 notes, less trees of ranks 0
-        // and 1, plus two of rank 1.
+        // Trees of ranks 18 down to 2, then 1 and 1.
         uint256 count = (1 << 20) - 21 - 1 - 3 + 6;
         _seedMmr(address(realProxy), count);
         ShieldedPoolLogic.Spend memory s = _spend(bytes32(uint256(501)), bytes32(uint256(502)), 7, address(0xB0B));
@@ -447,8 +434,7 @@ contract DispatcherPoolTest {
         require(pool.nextIndex() == 1, "deposit missing from the new epoch");
     }
 
-    /// The dispatcher's constructor writes maxDepth to MMR_MAX_DEPTH_SLOT, and the pool's
-    /// appends read it there: capped at one tree, a second deposit needs a second tree.
+    /// Capped at one tree, a second deposit needs a second tree.
     function test_mmr_max_depth_is_at_the_slot_the_dispatcher_writes() public {
         _store(address(proxy), MMR_MAX_DEPTH_SLOT, 1);
         pool.shield{value: 1}(bytes32(uint256(33)), _note());

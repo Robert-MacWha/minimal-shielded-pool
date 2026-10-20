@@ -15,7 +15,6 @@ contract VerifierCanonicalTest {
     VmJson constant vm = VmJson(address(uint160(uint256(keccak256("hevm cheat code")))));
     uint256 constant Q = 21888242871839275222246405745257275088696311157297823662689037894645226208583;
     uint256 constant P = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
-    // The statement: twelve values, then the frontier's MAX_TREES roots.
     uint256 constant MAX_TREES = 20;
     uint256 constant N = 12 + MAX_TREES;
     Groth16Verifier verifier;

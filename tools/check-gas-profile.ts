@@ -58,8 +58,7 @@ const MAX_SSTORE_OPERATIONS = 15n;
 const MAX_NEW_STORAGE_SLOTS = 5n;
 
 // Pinned ethrex 247e2dd2, two outputs that each merge two trees and a new credit, carrying a
-// first payment's 1,184 note bytes. See test/native/native-report.json. An append hashes at
-// most once, so no settlement repeats the depth-20 tree's 39-hash long carry.
+// first payment's 1,184 note bytes. See test/native/native-report.json.
 const NATIVE_MAX_OBSERVED_SETTLEMENT_GAS = 229_284n;
 // EIP-8038: cold access (2,100) + STORAGE_WRITE (10,000).
 const EIP_8038_COLD_WRITE_GAS = 12_100n;

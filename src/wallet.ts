@@ -114,10 +114,8 @@ export class Tree implements MerkleTree {
 }
 
 /**
- * The native generator's pool near capacity: `count` copies of `cm`, followed by the commitments
- * `extras`. The copies stand in for the deposits before the extras. Subtrees of the repeated
- * commitment are equal, so the hasher keeps each answer and only the few distinct nodes are
- * hashed.
+ * The native generator's pool near capacity: `count` copies of `cm`, then `extras`. Equal
+ * subtrees hash alike, so the hasher caches each node and only the few distinct ones are hashed.
  */
 export class RepeatedTree extends Tree {
   constructor(cm: bigint, count: bigint, extras: readonly bigint[] = []) {
@@ -168,9 +166,9 @@ function pathOf(
 }
 
 /**
- * A Poseidon tree padded on the right with empty subtrees: by default an owner set's depth-16
- * tree. Each level is kept and rehashed only above leaves appended since the last read, so a
- * tree is hashed once, not once per root or path.
+ * An owner set's Poseidon tree, padded on the right with empty subtrees. Each level is kept and
+ * rehashed only above leaves appended since the last read, so a tree is hashed once, not once
+ * per root or path.
  */
 export class OwnerTree {
   readonly depth: number;

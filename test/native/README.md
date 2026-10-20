@@ -40,8 +40,7 @@ them by design.
 The recorded run passes 90 native scenarios and two client-policy tests, using
 33 real Groth16 proofs. The highest measured settlement execution cost is
 229,284 gas (two merges plus withdrawal credit, with a first payment's notes).
-The five-new-slot state case, two outputs that each start a tree at a depth no
-epoch has reached plus a retained credit, uses 489,600 state gas, below the
+The five-new-slot state case uses 489,600 state gas, below the
 pinned state limit. The reports contain each transaction hash and per-frame
 results. This suite, not Forge, bounds settlement gas, because it deploys the
 `libsmall` Poseidon builds a real pool uses, while the Forge suite runs the

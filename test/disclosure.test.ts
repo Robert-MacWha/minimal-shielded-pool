@@ -256,7 +256,6 @@ test("an altered note is rejected", async (t) => {
     ["a", { epoch: 1n, created: "0xdep_epoch1" }, "spends epoch 0, not 1"],
     ["a", { spent: "0xwithdraw" }, "not one 0xwithdraw spent"],
     ["a", { created: "0xdep3" }, "did not create it"],
-    // A copy of the same commitment at another leaf has a nullifier of its own.
     ["a", { index: 3n, created: "0xdep3", nullifierKey: keyA }, "not one 0xtransfer spent"],
     ["d1", { value: "1" }, "opening does not match"],
     ["d1", {}, "a dummy input has value 0 and a spend", "spent"],

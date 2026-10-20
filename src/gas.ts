@@ -22,10 +22,9 @@
 // of headroom, so with the two signatures the declared validation budget is 238,600.
 export const RECENT_ROOT_FRAME_GAS = 8_000n;
 export const RECENT_ROOT_TUPLE_BYTES = 72;
-// skew-mmr-v1 commits each note to an owner set, adds the owner's signature to every spend
-// (owner-set-v1, never deployed) and keeps each epoch's notes in a skew-MMR whose frontier
-// settle(Spend) carries, so its notes, proofs and transactions are not compatible with
-// position-notes-v3.
+// skew-mmr-v1 commits each note to an owner set, adds the owner's signature to every spend and
+// keeps each epoch's notes in a skew-MMR, so its notes, proofs and transactions are not
+// compatible with position-notes-v3.
 export const POOL_PROFILE = "skew-mmr-v1";
 // The previous profile. Between a profile change and its first deployment the deployment
 // record still names it, and the CLI refuses to spend against it.
@@ -51,12 +50,9 @@ export const SETTLE_FRAME_DATA_BYTES: readonly number[] = Object.freeze(
   SPEND_NOTES_BYTES.map((n) => SETTLE_SPEND_BYTES + n),
 );
 export const VERIFY_FRAME_GAS = 225_000n;
-// Native ethrex 247e2dd2 spends at 262,143 and 524,287 leaves of the
-// depth-20 tree verified and approved, then settlement OOGed with no outputs
-// at 1.4M, so the signed SENDER pin became 2M. The skew-MMR's heaviest
-// settlement uses 229,284, and the pin stays part of the dispatcher profile.
-// 2M is not a proof of every settlement shape. State stays a separate
-// declared dimension.
+// The signed SENDER pin. tools/check-gas-profile.ts checks it against the
+// heaviest measured settlement; it is not a proof of every settlement shape.
+// State stays a separate declared dimension.
 export const SETTLE_FRAME_GAS = 2_000_000n;
 export const SETTLE_FRAME_STATE_GAS = 550_000n;
 // Wallet/tooling default for the normal withdraw tail:

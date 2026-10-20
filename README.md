@@ -168,10 +168,8 @@ nf = Poseidon3(4, Poseidon2(D, nk), Poseidon2(cm, index))
 Here `domain_tag = keccak256("minimal-shielded-pool:occurrence-domain:v1")`,
 each field is 32 bytes and `r` is the BN254 scalar field order. The pool
 checks that `D` uses the epoch of the root the spend proves against, so each
-note has exactly one nullifier. The circuit derives the index from the note's
-opening in the MMR, and it stays fixed as the MMR grows. A zero-value dummy
-input, whose membership is not checked, takes index 0. Wallets must track notes
-by position and rebuild positions after a reorg.
+note has exactly one nullifier. A zero-value dummy input takes index 0. Wallets
+must track notes by position and rebuild positions after a reorg.
 
 ## Transactions
 
@@ -266,8 +264,7 @@ adapter. See [SECURITY.md](SECURITY.md#the-fourth-frame).
 
 When the current tree lacks room for the notes being inserted (an epoch holds
 2^21 − 22), the pool starts a new epoch first, for shields and settlements
-alike. Sinks take no space, so a
-full tree never blocks a full withdrawal. `publishEpochRoot(epoch)` takes no
+alike. Sinks take no space, so a full tree never blocks a full withdrawal. `publishEpochRoot(epoch)` takes no
 root from its caller and reads the epoch's root from pool state, so anyone may
 publish the pool's current or final epoch root to EIP-8272. A failed
 publication consumes no notes. If a transfer's own publication fails or names
@@ -473,8 +470,8 @@ byte for byte, with the earlier devnet runs and reviews, under the
 Each profile needs its own deployment, because a deployed pool cannot be
 upgraded. A `position-notes-v3` pool rejects this profile's spends, whose
 proofs follow the owner-set relation over a skew-MMR and which carry the owner's
-signature and the tree's frontier, and its notes use spend keys that no owner set opens. This profile has no
-deployment yet: `core/deploy_config.json` still records the
+signature and the tree's frontier, and its notes use spend keys that no owner
+set opens. This profile has no deployment yet: `core/deploy_config.json` still records the
 `position-notes-v3` testnet deployment, which the CLI refuses to spend from.
 
 The earlier pools stay on chain. `position-notes-v3` (`0x5ec4…de09` on chain
@@ -550,8 +547,8 @@ manifest marked `production: true`.
 
 The Forge tests in `core/contracts/test/` run the contracts with the committed
 verifier and Poseidon libraries. They check that settlement fits the 2,000,000
-gas pin through an epoch rollover and two merges in a row, full-tree exits, sink positions, root publication apart from
-settlement, a failed claim keeping its credit, a reentrant recipient paid once,
+gas pin through an epoch rollover and two merges in a row, full-tree exits,
+sink positions, root publication apart from settlement, a failed claim keeping its credit, a reentrant recipient paid once,
 the refusal of direct calls to the implementation, and that the verifier
 refuses non-canonical and infinity points and binds each statement value,
 `beta` and `gamma`.
@@ -565,14 +562,11 @@ A Lean formal verification of the `position-notes-v2` pool at `8835be7` lives in
 [verified-shielded-pool](https://github.com/soispoke/verified-shielded-pool),
 with its own CI. Its SPEC.md says which claims are proved and which are still
 open, and pins twelve files by hash. Of those, only the Poseidon libraries
-still match. The owner set and then the skew-MMR changed the relation: the
-circuit, its R1CS, the proving and verification keys, the verifier and the
+still match. The owner set and the skew-MMR change the relation: the circuit,
+its R1CS, the proving and verification keys, the verifier, the logic and the
 dispatcher, which checks the owner's signature and opens the tree's frontier,
-all differ in what they do. For note delivery, the dispatcher also admits
-settlement frame data of 484 or 1,572 bytes instead of exactly 388, and shield
-and settlement check the length of the notes they carry and emit them; the
-skew-MMR changed both the logic and these lengths again. The dispatcher
-initcode, `foundry.toml` and the activation manifest differ too. The proofs do
+all differ in what they do, and settlement frame data carries notes and the
+frontier. The dispatcher initcode, `foundry.toml` and the activation manifest differ too. The proofs do
 not cover these changes. The formal repository is checked out as `formal/`
 inside a pool checkout, which git ignores here. CI's `formal-pins` job lists
 every pinned file that differs, as warnings that do not fail the build

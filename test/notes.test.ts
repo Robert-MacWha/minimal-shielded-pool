@@ -325,8 +325,7 @@ test("recovery: each wallet rebuilds its notes, spends and change channel from i
   const lateFound = lateScanner.scan(twice);
   assert.equal(lateFound.length, 1);
   assert.equal(lateFound[0].nullifier, nullifierOf(ALICE, late.cm, 0n, 1n));
-  // A later copy of that commitment in the epoch is a note of its own, with its own nullifier,
-  // so spending one leaves the other unspent.
+  // A later copy of that commitment is a separate note: spending one leaves the other.
   const copy = { ...twice, block: 2n, leaves: [{ ...leaf, index: 1n }] };
   const copyFound = lateScanner.scan(copy);
   assert.equal(copyFound.length, 1);

@@ -35,7 +35,7 @@ const fits = (value: bigint, bits: bigint) => value >= 0n && value < 1n << bits;
 
 // ---- field, tree and note hashes (mirror core/circuits/spend.circom) ----
 
-/** The most trees an epoch's skew-MMR holds, as in the circuit, the dispatcher and the pool. */
+/** The most trees an epoch's skew-MMR holds. */
 export const MAX_TREES = 20;
 /** An MMR of at most MAX_TREES trees holds 2^(MAX_TREES + 1) - MAX_TREES - 2 notes. */
 export const TREE_CAPACITY = (1n << BigInt(MAX_TREES + 1)) - BigInt(MAX_TREES) - 2n;
@@ -85,9 +85,8 @@ export function domainKey(domain: bigint, nk: bigint): bigint {
 }
 
 /**
- * A note occurrence's nullifier from its domain key. The index, the note's position in its
- * epoch's MMR in insertion order, is hashed in, so two deposits of one commitment are spent
- * independently.
+ * A note occurrence's nullifier from its domain key. The note's index is hashed in, so two
+ * deposits of one commitment are spent independently.
  */
 export function nullifierFromKey(key: bigint, cm: bigint, index: bigint): bigint {
   if (index < 0n || index >= TREE_CAPACITY) {
@@ -184,10 +183,7 @@ export function sinkCommitments(): bigint[] {
   return outputCommitments(sinkOutputs());
 }
 
-/**
- * The nullifiers of inputs in the owner set with root ownerRoot, in order. A zero-value input is
- * never in the MMR, so the circuit gives it index 0.
- */
+/** The nullifiers of inputs in the owner set with root ownerRoot, in order; a dummy uses index 0. */
 export function inputNullifiers(
   domain: bigint,
   ownerRoot: bigint,
@@ -395,8 +391,9 @@ function checkNotes(notes: Uint8Array, sizes: readonly number[], what: string): 
  */
 export function encodeSettle(spend: Spend, notes: Uint8Array): Uint8Array {
   const words = SPEND_FIELDS.map((f) => abiWord(spend[f], SPEND_ABI[f], `settle ${f}`));
-  if (spend.frontier.length !== MAX_TREES)
+  if (spend.frontier.length !== MAX_TREES) {
     throw new InputError(`settle frontier must be ${MAX_TREES} roots`);
+  }
   const frontier = spend.frontier.map((root) => abiWord(root, "bytes32", "settle frontier"));
   checkNotes(notes, SPEND_NOTES_BYTES, "spend");
   return concat(SETTLE_SELECTOR, ...words, ...frontier, notes);

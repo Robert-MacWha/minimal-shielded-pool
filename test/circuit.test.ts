@@ -1,11 +1,10 @@
 /**
  * The spend circuit, with real witnesses against the committed artifacts and one real Groth16
- * proof: duplicates of one commitment at different positions get distinct nullifiers, the committed
- * R1CS (not only the WASM's runtime asserts) rejects every broken witness, including an owner
- * outside the owner set, an empty leaf as the owner, and a non-boolean path bit that would place
- * any address under the set's root, beta and gamma are constrained, assertUnprovable (the smoke
- * generator's soundness
- * gate) counts only an in-circuit assertion as a refusal, verify() accepts the call the pool
+ * proof: duplicates of one commitment at different positions get distinct nullifiers, the
+ * committed R1CS (not only the WASM's runtime asserts) rejects every broken witness, including an
+ * owner outside the owner set, an empty leaf as the owner, and a non-boolean path bit that would
+ * place any address under the set's root, beta and gamma are constrained, assertUnprovable (the
+ * smoke generator's soundness gate) counts only an in-circuit assertion as a refusal, verify() accepts the call the pool
  * probes a deployed verifier with, and it refuses every mutated statement value and the
  * out-of-field words and signals that snarkjs alone would accept. The consumed-key registry and
  * the authentication of epoch roots are left to the native tests.
@@ -324,8 +323,8 @@ const later = treeOf([...tree.leaves, pr.commitment(...newNote(rng), 29n)]);
 // A reorg can change the insertion order of the same two deposits.
 const otherCm = pr.commitment(...newNote(rng), 37n);
 const [branchA, branchB] = [treeOf([cm, otherCm]), treeOf([otherCm, cm])];
-// The third append merges the first two notes, so the note at index 0 has otherCm beside it. In
-// `tree` its sibling is its own copy, so the other branch opens the copy, a note of its own.
+// Index 0's sibling here is otherCm, so flipping its path bit opens no note. In `tree` the
+// sibling is its own copy, a valid note.
 const merged = treeOf([cm, otherCm, cm]);
 const transferOutputs = [60n, 40n].map((value): pr.Output => [pr.inner(...newNote(rng)), value]);
 // Two funded inputs of 2^128 - 1 and 1, and an output that takes all but 1 of them.
@@ -362,7 +361,7 @@ const [otherEpoch, otherEpochStmt] = spend([real, dummy], later, domain1);
 // spends it at that index, which is `duplicate`'s opening, before reproving.
 const [rebuilt, rebuiltStmt] = spend([duplicate, dummy], branchB);
 const [dummyPair, dummyStmt] = spend([real, { nk, rho, value: 0n, idx: null }], later);
-// A dummy's opening is not checked, so it may name any tree and path, and its index is still 0.
+// A dummy's opening is unchecked, and its index is 0 whatever the opening names.
 const anyOpening = edited(dummyPair, (w) => {
   w.in_tree[1] = "1";
   w.in_path_len[1] = "2";

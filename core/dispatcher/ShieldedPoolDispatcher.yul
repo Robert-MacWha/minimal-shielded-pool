@@ -16,9 +16,7 @@
 /// other's transactions, so deploy the one that matches the chain.
 object "ShieldedPoolDispatcher" {
     code {
-        // ShieldedPoolLogic.currentRoot (storage slot 0) starts as EMPTY_ROOT, the root of
-        // the empty MMR, and its mmr.maxDepth (slot 48) as MAX_TREES, which LibSkewMmr.init
-        // would store.
+        // ShieldedPoolLogic.currentRoot = EMPTY_ROOT and mmr.maxDepth = MAX_TREES.
         sstore(0, 0x012893657d8eb2efad4de0a91bcd0e39ad9837745dec3ea923737ea803fc8e3d)
         sstore(48, 20)
 
@@ -79,7 +77,7 @@ object "ShieldedPoolDispatcher" {
             }
             // Amounts are below 2^128, the circuit's range check.
             function maxValue() -> v { v := 0x100000000000000000000000000000000 }
-            // ShieldedPoolLogic.MAX_TREES, the length of settle(Spend)'s frontier.
+            // ShieldedPoolLogic.MAX_TREES.
             function maxTrees() -> n { n := 20 }
             // ShieldedPoolLogic.DOMAIN_TAG.
             function domainTag() -> v {
@@ -144,11 +142,8 @@ object "ShieldedPoolDispatcher" {
                 a := and(mload(0), 0xffffffffffffffffffffffffffffffffffffffff)
             }
 
-            // The frontier's root as LibSkewMmrVerifier.frontierCommitment computes it:
-            // keccak256(chain, packedRanks, depth, count), where chain folds
-            // keccak256(chain, root) over the roots below depth, from zero. A nonzero root at
-            // or above depth is refused, so each frontier has one encoding in the statement.
-            // Uses memory 0 to 0x80.
+            // LibSkewMmrVerifier.frontierCommitment. A nonzero root at or above depth is
+            // refused, so each frontier has one encoding in the statement. Uses memory 0 to 0x80.
             function frontierRoot(settleIndex, packedRanks, depth, count) -> r {
                 let chain := 0
                 for { let i := 0 } lt(i, maxTrees()) { i := add(i, 1) } {
@@ -202,10 +197,8 @@ object "ShieldedPoolDispatcher" {
                 if iszero(eq(iszero(pub), iszero(recipient))) { fail(errShape()) }
                 if iszero(eq(dom, domainVal(epoch))) { fail(errDomain()) }
 
-                // root is the one the recent-root frame names, and the statement carries the
-                // frontier, so the frontier must open root (LibSkewMmrVerifier). Its roots
-                // below depth are then the pool's Poseidon outputs, below p, and packedRanks
-                // and depth are the pool's own.
+                // The frontier must open the root the recent-root frame names, which makes it
+                // the pool's own, its roots below p.
                 if shr(64, count) { fail(errCanonical()) }
                 if gt(depth, maxTrees()) { fail(errRoot()) }
                 if iszero(eq(root, frontierRoot(settleIndex, packedRanks, depth, count))) { fail(errRoot()) }
@@ -246,9 +239,8 @@ object "ShieldedPoolDispatcher" {
                 // Hybrid compression (eprint 2025/1500): alpha = keccak256(statement) mod p,
                 // and gamma is the statement evaluated as a polynomial at alpha + beta,
                 // highest term first. The statement is written at 0x200, past the verifier
-                // call built at 0x80 below, which ends at 0x1e4: twelve values, then the
-                // frontier's MAX_TREES roots. The owner is a 20-byte signer, so it needs no
-                // range check.
+                // call built at 0x80 below, which ends at 0x1e4. The owner is a 20-byte signer,
+                // so it needs no range check.
                 let st := 0x200
                 mstore(st, nf1)
                 mstore(add(st, 0x20), nf2)
@@ -360,17 +352,15 @@ object "ShieldedPoolDispatcher" {
                 // at 2,000,000 because running out of gas after approval would burn the notes.
                 if iszero(eq(frameParam(2, 0x00), address())) { fail(errShape()) }
                 if iszero(eq(frameParam(2, 0x01), 2000000)) { fail(errShape()) }
-                // tools/check-gas-profile.ts bounds settlement's new storage slots at five: two
-                // appends that each start a tree at a depth no epoch has reached write a root
-                // and a chain each, and a withdrawal credit; a rollover writes fewer. Five slots of 64 state bytes at 1,530 gas per byte
-                // (src/gas.ts) is 489,600, and the state limit is pinned at 550,000 for the
-                // same reason as the execution limit.
+                // tools/check-gas-profile.ts bounds settlement's new storage slots at five.
+                // Five slots of 64 state bytes at 1,530 gas per byte (src/gas.ts) is 489,600,
+                // and the state limit is pinned at 550,000 for the same reason as the execution
+                // limit.
                 if iszero(eq(frameParam(2, 0x09), 550000)) { fail(errShape()) }
                 if iszero(eq(frameParam(2, 0x02), 2)) { fail(errShape()) }
                 if frameParam(2, 0x03) { fail(errShape()) }
-                // settle(Spend) is 1,124 bytes (the selector, fifteen words and MAX_TREES roots),
-                // followed by two 48-byte notes, optionally after a 1,088-byte ML-KEM-768
-                // ciphertext. Settlement only emits them.
+                // settle(Spend), then two 48-byte notes, optionally after a 1,088-byte
+                // ML-KEM-768 ciphertext. Settlement only emits them.
                 let settleLength := frameParam(2, 0x04)
                 if iszero(or(eq(settleLength, 1220), eq(settleLength, 2308))) { fail(errShape()) }
                 if frameParam(2, 0x08) { fail(errShape()) }

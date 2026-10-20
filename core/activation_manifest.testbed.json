@@ -35,14 +35,14 @@
     "core/artifacts/spend_final.zkey": "824d9815aaada302007c146717d54a0979bb147341eb82d89b5d5c58b7f8adf2",
     "core/artifacts/spend_js/spend.wasm": "2be57ff00f9c70fc81c1ffdfa461978d61b89669ceccd5312995f4a036793fcf",
     "core/circuits/spend.circom": "db9b0bfe9949ab23d950b256fb8fa568f290048e639b41bb0c6574bb281e0238",
-    "core/contracts/foundry.toml": "a856e21a2c8b58bbd0d2b7519bb84f876086e9e957dde4cf917fd3080726add0",
+    "core/contracts/foundry.toml": "587431be879eb9b9d79e92ca228f2e5babd56435d0065841201fc9a59e505109",
     "core/contracts/src/Groth16Verifier.sol": "f74681364261b45441efb1674d06ae407e933f34726bef14359a5f83eacfc534",
     "core/contracts/src/PoseidonT3.sol": "f353af63ac124e51a37e78dc5278bcb2e93c19e44aa8dd13a4ecb4c54212720b",
     "core/contracts/src/PoseidonT4.sol": "2384b8f71a2ed09f3b16c6b0d135bedcd293cb1c862e8a3c893d0ac79eae0960",
-    "core/contracts/src/ShieldedPoolLogic.sol": "f7af363edbb609b5802ec4464b14138c4999bbc34eecf2b099114759fc0f0a60",
-    "core/dispatcher/ShieldedPoolDispatcher.yul": "88753fa03bbee0c22d35108f52d5853e45e19671353719439fee66a5ba29ebc0",
+    "core/contracts/src/ShieldedPoolLogic.sol": "3b8aaf6dddcf139e71defb24c38df5afa22e9f79a83c1506b9a47e9db3aeeb5b",
+    "core/dispatcher/ShieldedPoolDispatcher.yul": "570191834d6d77b2a798eae09f76cc1f376de98f046be3c6284c6ed7694b3fe2",
     "core/artifacts/shielded_pool_dispatcher_init.hex": "60f114f354293e8c20ccbdebf1260d4519f2d646ce0e1c72d6e1338b9071ceb6",
-    "src/gas.ts": "e73303d35654298cad21e1bee9f4f4aaf4fae9674e01fbc5a81e1d270c000591"
+    "src/gas.ts": "09b3dceedc7b27eda283c5967f2d77fd2975a5aaed76ae83cb6296e98f176de2"
   },
   "compiler": {
     "default": {
