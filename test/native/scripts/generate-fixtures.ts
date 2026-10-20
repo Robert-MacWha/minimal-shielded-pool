@@ -86,7 +86,7 @@ const settleWord = (value: string) =>
 const frontierWord = (i: number) => 4 + 32 * (protocol.SPEND_FIELDS.length + i);
 
 type Entry = Record<string, unknown>;
-/** Storage slots in insertion order: a plain object would move "47" ahead of hashed keys. */
+/** Storage slots in insertion order: a plain object would move "46" ahead of hashed keys. */
 type Slots = Map<string, string>;
 type Pair = [slot: string, value: bigint | number];
 type Step = { raw?: string; storage?: Record<string, Slots>; [key: string]: unknown };
@@ -95,11 +95,11 @@ type Mutation = (frames: Frame[]) => void;
 /** An entry's integer field, which spendEntry writes as 0x hex or decimal digits. */
 const int = (entry: Entry, key: string) => BigInt(String(entry[key]));
 
-// Pool storage: slot 0 holds the root, 1 a mapping of withdrawal credit by recipient, 2 the
-// epoch, 3 a mapping of final roots by epoch, and 4 to 90 the epoch's MMR (LibSkewMmr.State):
-// roots from 4, the packed ranks at 46, depth and count at 47, maxDepth at 48 and chains from 49.
-const [ROOT_SLOT, EPOCH_SLOT, RANKS_SLOT, DEPTH_COUNT_SLOT] = ["0", "2", "46", "47"];
-const [CREDITS, FINAL_ROOTS, MMR_ROOTS, MMR_CHAINS] = [1n, 3n, 4n, 49n];
+// Pool storage: slot 0 holds a mapping of withdrawal credit by recipient, 1 the epoch, 2 a
+// mapping of final roots by epoch, and 3 to 88 the epoch's MMR (LibSkewMmr.State): roots from 3,
+// the packed ranks at 45, depth and count at 46 and chains from 47.
+const [EPOCH_SLOT, RANKS_SLOT, DEPTH_COUNT_SLOT] = ["1", "45", "46"];
+const [CREDITS, FINAL_ROOTS, MMR_ROOTS, MMR_CHAINS] = [0n, 2n, 3n, 47n];
 function update(slots: Slots, ...pairs: Pair[]): Slots {
   for (const [slot, value] of pairs) slots.set(slot, String(value));
   return slots;
@@ -114,12 +114,11 @@ const keySlot = (entry: Entry, key: string) => toHex(protocol.nonceKeySlot(POOL,
 /** The slots of a spend's two nullifier keys, 1 once consumed. */
 const keySlots = (entry: Entry, nf1: bigint, nf2 = nf1) =>
   slots([keySlot(entry, "nf1"), nf1], [keySlot(entry, "nf2"), nf2]);
-/** The words an append changes: the root, the packed ranks, and depth with count. */
+/** The words an append changes besides its root and chain: the packed ranks, depth and count. */
 function mmrWords(tree: MerkleTree): Pair[] {
   const { roots, ranks, count } = tree.frontier();
   const depthCount = BigInt(roots.length) | (count << 8n);
   return [
-    [ROOT_SLOT, tree.root()],
     [RANKS_SLOT, protocol.packRanks(ranks)],
     [DEPTH_COUNT_SLOT, depthCount],
   ];

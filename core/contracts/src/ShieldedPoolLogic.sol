@@ -21,8 +21,6 @@ contract ShieldedPoolLogic {
     uint256 internal constant P = 21888242871839275222246405745257275088548364400416034343698204186575808495617;
     /// @dev Amounts are below 2^128, the circuit's range check.
     uint256 internal constant MAX_VALUE = 1 << 128;
-    /// @notice The root of the empty MMR, keccak256(0, 0, 0, 0).
-    bytes32 public constant EMPTY_ROOT = 0x012893657d8eb2efad4de0a91bcd0e39ad9837745dec3ea923737ea803fc8e3d;
     /// @notice keccak256("minimal-shielded-pool:occurrence-domain:v1"), the first word of
     /// every nullifier domain.
     bytes32 public constant DOMAIN_TAG = 0xa9d03fa1cd97bcf3294dc8e3bb024f555393c98967b356967fa502abab366ed3;
@@ -46,17 +44,14 @@ contract ShieldedPoolLogic {
     address private immutable IMPLEMENTATION_SELF = address(this);
     address public immutable POSEIDON_T4;
 
-    // The dispatcher's constructor writes slots 0 and 48, so these slots must not move.
-    /// @notice The current MMR's root.
-    bytes32 public currentRoot; // slot 0
     /// @notice The ETH settlement owes each recipient, which claimWithdrawal pays out.
-    mapping(address => uint256) public withdrawalCredit; // slot 1
+    mapping(address => uint256) public withdrawalCredit; // slot 0
     /// @notice The epoch whose MMR takes new notes.
-    uint64 public currentEpoch; // slot 2
+    uint64 public currentEpoch; // slot 1
     /// @notice Each closed epoch's root, from when it closed.
-    mapping(uint64 => bytes32) public finalRoot; // slot 3
+    mapping(uint64 => bytes32) public finalRoot; // slot 2
     /// @dev The current epoch's skew-MMR, laid out by LibSkewMmr.
-    LibSkewMmr.State internal mmr; // slots 4..90
+    LibSkewMmr.State internal mmr; // slots 3..88
 
     /// @dev settle's argument. The dispatcher checks that count, packedRanks, depth and
     /// frontier open root, the root the recent-root tuple names.
@@ -120,9 +115,6 @@ contract ShieldedPoolLogic {
     /// @notice A spend names a recipient without a withdrawal or a withdrawal without a
     /// recipient, has two equal outputs, or has a sink in the other output's position.
     error InvalidSettlementShape();
-    /// @notice The epoch has no root, which happens only if the pool's deployment did not
-    /// store EMPTY_ROOT.
-    error InvalidRoot();
     error RootPublishFailed();
     error NoCredit();
     /// @notice The ETH transfer to the recipient failed, so the credit stays.
@@ -139,7 +131,6 @@ contract ShieldedPoolLogic {
         _;
     }
 
-    /// @dev The dispatcher's constructor, not this one, initializes storage.
     constructor(address poseidonT4) {
         if (poseidonT4.code.length == 0) revert InvalidHashLibrary();
         POSEIDON_T4 = poseidonT4;
@@ -148,6 +139,11 @@ contract ShieldedPoolLogic {
     /// @notice The next note's index in the current epoch's MMR.
     function nextIndex() external view returns (uint64) {
         return mmr.count;
+    }
+
+    /// @notice The current MMR's root, the commitment the dispatcher opens with a spend's frontier.
+    function currentRoot() public view returns (bytes32) {
+        return LibSkewMmr.root(mmr);
     }
 
     /// @notice The EIP-8272 source_id that publishEpochRoot(epoch) writes under,
@@ -193,7 +189,6 @@ contract ShieldedPoolLogic {
         _ensureCapacity(1);
         bytes32 root;
         (index, root) = _insert(cm);
-        currentRoot = root;
         emit LeafAppended(cm, currentEpoch, index, root);
         emit Notes(note);
     }
@@ -247,11 +242,8 @@ contract ShieldedPoolLogic {
         bytes32 root;
         if (new1) (i1, root) = _insert(s.outCm1);
         if (new2) (i2, root) = _insert(s.outCm2);
-        if (new1 || new2) {
-            currentRoot = root;
-            if (new1) emit LeafAppended(s.outCm1, currentEpoch, i1, root);
-            if (new2) emit LeafAppended(s.outCm2, currentEpoch, i2, root);
-        }
+        if (new1) emit LeafAppended(s.outCm1, currentEpoch, i1, root);
+        if (new2) emit LeafAppended(s.outCm2, currentEpoch, i2, root);
 
         if (s.publicAmount != 0) {
             withdrawalCredit[s.recipient] += s.publicAmount;
@@ -269,10 +261,9 @@ contract ShieldedPoolLogic {
     /// @param epoch The current epoch, whose root changes as leaves arrive, or a closed one.
     function publishEpochRoot(uint64 epoch) external onlyDelegate {
         bytes32 root;
-        if (epoch == currentEpoch) root = currentRoot;
+        if (epoch == currentEpoch) root = currentRoot();
         else if (epoch < currentEpoch) root = finalRoot[epoch];
         else revert InvalidEpoch();
-        if (root == bytes32(0)) revert InvalidRoot();
 
         bytes32 salt = bytes32(uint256(epoch));
         (bool ok,) = RECENT_ROOT_PREDEPLOY.call(abi.encodePacked(salt, root));
@@ -301,10 +292,9 @@ contract ShieldedPoolLogic {
 
     function _rollEpoch() internal {
         uint64 closed = currentEpoch;
-        bytes32 closedRoot = currentRoot;
+        bytes32 closedRoot = currentRoot();
         finalRoot[closed] = closedRoot;
         currentEpoch = closed + 1;
-        currentRoot = EMPTY_ROOT;
         // LibSkewMmr ignores roots and chains at or above depth.
         mmr.packedRanks = 0;
         mmr.depth = 0;

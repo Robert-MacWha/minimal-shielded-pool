@@ -50,16 +50,16 @@ export const MAX_OBSERVED_RECENT_ROOT_FRAME_GAS = 5_579n;
 const CONSERVATIVE_VERIFY_STATE_BOUND =
   gas.SPEND_NONCE_KEY_COUNT * gas.KEYED_NONCE_FIRST_USE_STATE_GAS;
 
-// A rollover writes the final root, the epoch, the root and the MMR's packed ranks, depth and
-// count, and each append a root, a chain, the packed ranks and the depth and count (treeShapes).
+// A rollover writes the final root, the epoch and the MMR's packed ranks, depth and count, and
+// each append a root, a chain, the packed ranks and the depth and count (treeShapes).
 // New slots: each of two appends may start a tree at a depth no epoch has reached, a new root
 // and chain, and a credit may be new; a rollover writes fewer.
-const MAX_SSTORE_OPERATIONS = 15n;
+const MAX_SSTORE_OPERATIONS = 13n;
 const MAX_NEW_STORAGE_SLOTS = 5n;
 
 // Pinned ethrex 247e2dd2, two outputs that each merge two trees and a new credit, carrying a
 // first payment's 1,184 note bytes. See test/native/native-report.json.
-const NATIVE_MAX_OBSERVED_SETTLEMENT_GAS = 229_284n;
+const NATIVE_MAX_OBSERVED_SETTLEMENT_GAS = 217_126n;
 // EIP-8038: cold access (2,100) + STORAGE_WRITE (10,000).
 const EIP_8038_COLD_WRITE_GAS = 12_100n;
 
@@ -79,9 +79,9 @@ const FROZEN_VERIFY_FRAME_GAS = 320_000n;
 const FROZEN_SETTLE_FRAME_GAS = 2_000_000n;
 
 /**
- * The most hashes and storage writes one settlement's appends make at any MMR size: 2 and 10
- * without a rollover, 0 and 15 with one. An append merges the two smallest trees, with one hash,
- * when their ranks are equal (LibSkewMmr); a settlement also writes the root and a credit.
+ * The most hashes and storage writes one settlement's appends make at any MMR size: 2 and 9
+ * without a rollover, 0 and 13 with one. An append merges the two smallest trees, with one hash,
+ * when their ranks are equal (LibSkewMmr); a settlement also writes a credit.
  * The MMR never holds more than MAX_TREES trees below TREE_CAPACITY notes.
  */
 function treeShapes() {
@@ -109,7 +109,7 @@ function treeShapes() {
       for (let i = 0; i < count; i++) hashes += append(after);
       const shape = rolled ? shapes.rollover : shapes.no_rollover;
       shape[0] = Math.max(shape[0], hashes);
-      shape[1] = Math.max(shape[1], (rolled ? 5 : 0) + 4 * count + 2);
+      shape[1] = Math.max(shape[1], (rolled ? 4 : 0) + 4 * count + 1);
     }
     if (start < capacity) append(ranks);
   }

@@ -27,7 +27,7 @@
     "settle_frame_state_gas": 550000,
     "claim_frame_gas": 100000,
     "claim_frame_state_gas": 183600,
-    "conservative_settle_bound": 423929,
+    "conservative_settle_bound": 386407,
     "conservative_settle_state_bound": 489600
   },
   "artifacts": {
@@ -39,9 +39,9 @@
     "core/contracts/src/Groth16Verifier.sol": "f74681364261b45441efb1674d06ae407e933f34726bef14359a5f83eacfc534",
     "core/contracts/src/PoseidonT3.sol": "f353af63ac124e51a37e78dc5278bcb2e93c19e44aa8dd13a4ecb4c54212720b",
     "core/contracts/src/PoseidonT4.sol": "2384b8f71a2ed09f3b16c6b0d135bedcd293cb1c862e8a3c893d0ac79eae0960",
-    "core/contracts/src/ShieldedPoolLogic.sol": "3b8aaf6dddcf139e71defb24c38df5afa22e9f79a83c1506b9a47e9db3aeeb5b",
-    "core/dispatcher/ShieldedPoolDispatcher.yul": "570191834d6d77b2a798eae09f76cc1f376de98f046be3c6284c6ed7694b3fe2",
-    "core/artifacts/shielded_pool_dispatcher_init.hex": "60f114f354293e8c20ccbdebf1260d4519f2d646ce0e1c72d6e1338b9071ceb6",
+    "core/contracts/src/ShieldedPoolLogic.sol": "659f4d58c04b930d9cc1bbff8f8fd680cd71e7049ac32bef73560e06218c9723",
+    "core/dispatcher/ShieldedPoolDispatcher.yul": "24c1a85460645123b5410b87e3ae0a93f41220b3c49eb660f2121b9073a721ec",
+    "core/artifacts/shielded_pool_dispatcher_init.hex": "3a8626c39ee9260b9d6cbf849fea1ed9ed263e5212a592bdee3177eddfed22da",
     "src/gas.ts": "09b3dceedc7b27eda283c5967f2d77fd2975a5aaed76ae83cb6296e98f176de2"
   },
   "compiler": {

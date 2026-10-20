@@ -16,10 +16,6 @@
 /// other's transactions, so deploy the one that matches the chain.
 object "ShieldedPoolDispatcher" {
     code {
-        // ShieldedPoolLogic.currentRoot = EMPTY_ROOT and mmr.maxDepth = MAX_TREES.
-        sstore(0, 0x012893657d8eb2efad4de0a91bcd0e39ad9837745dec3ea923737ea803fc8e3d)
-        sstore(48, 20)
-
         // The deployer appends the logic and verifier addresses to this initcode as two
         // 32-byte words, as tools/dispatcher.ts --initcode does; copy them after the runtime.
         let rsize := datasize("runtime")
