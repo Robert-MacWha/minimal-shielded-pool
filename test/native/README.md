@@ -37,7 +37,7 @@ key is test-only. The vectors themselves are ignored by Git. The two reports,
 `native-report.json` and `policy-report.json`, are tracked, so a run changes
 them by design.
 
-The recorded run passes 89 native scenarios and two client-policy tests, using
+The recorded run passes 90 native scenarios and two client-policy tests, using
 33 real Groth16 proofs. The highest measured settlement execution cost is
 229,284 gas (two merges plus withdrawal credit, with a first payment's notes).
 The five-new-slot state case, two outputs that each start a tree at a depth no
